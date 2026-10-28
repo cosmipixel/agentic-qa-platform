@@ -216,9 +216,14 @@ def test_an_archive_just_under_the_largest_a_capture_scrubs_is_saved(
         return found
 
     monkeypatch.setattr(CDPSession, "send", measuring)
-    # A page of text, as the cap was measured on.
+    # A page of text, as the cap was measured on, from below the first
+    # screen: the archive holds the whole page, but the image only that
+    # screen, and a screen full of text is more than OCR reads in its bound
+    # (`aqa_runner.ocr.TEXT_CAP`, ADR-0035).
     paragraph = "<p>" + "the order ships once payment clears " * 12 + "</p>\n"
-    filler = paragraph * (int(screenshots.ARCHIVE_CHARS * 0.92) // len(paragraph))
+    filler = "<div style=height:100vh></div>" + paragraph * (
+        int(screenshots.ARCHIVE_CHARS * 0.92) // len(paragraph)
+    )
 
     async def scenario() -> int:
         async with browsing(sites, redactor=Redactor(bound(sites.app))) as session:
