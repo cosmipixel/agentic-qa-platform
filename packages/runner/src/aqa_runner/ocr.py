@@ -21,10 +21,11 @@ RECOGNISE = "PP-OCRv6_rec_small.onnx"
 # The most text an image may hold for OCR to read it, as the recogniser's
 # input length: each detected line's width over its height, at least the
 # recogniser's shortest, summed in its batches, each line as wide as its
-# batch's widest. Reading takes about 0.7-1.4 ms a unit on the developer's
-# Mac, and Conduit's pages measure 132-280. Provisional: to be set on CI's
-# runner (ADR-0035).
-TEXT_CAP = 500
+# batch's widest. Set on CI's runner, the slowest host, so that detecting
+# and reading an image at the cap takes half of `OCR_SECONDS` there:
+# floor((2.5 s - 0.346 s, its slowest detection) / 2.19 ms, its slowest
+# unit) (ADR-0035; Actions run 40747977277). Conduit's pages measure 132-280.
+TEXT_CAP = 983
 
 # RapidOCR 3.10.0's recogniser (its config.yaml, `Rec`): each line is read
 # 48 px high and at least 320 wide, six lines a batch.

@@ -95,14 +95,19 @@ def reflected(
     *,
     font: str = "40px sans-serif",
 ) -> tuple[str, list[str]]:
-    """What `saved` reports of a page that shows `text` in `font`, as an
-    app's server can show a bound value before any fill, so the capture is
-    the live page's, in a session that scans with `redactor` (by default,
-    of the test's bound secrets)."""
-    page = (
-        "<!doctype html><meta charset=utf-8>"
-        f"<p style='font:{font};margin:20px'>{html.escape(text)}</p>"
-    )
+    """What `shown` reports of a page that shows `text` in `font`, as an
+    app's server can show a bound value before any fill."""
+    body = f"<p style='font:{font};margin:20px'>{html.escape(text)}</p>"
+    return shown(sites, tmp_path, body, redactor)
+
+
+def shown(
+    sites: Sites, tmp_path: Path, body: str, redactor: Redactor | None = None
+) -> tuple[str, list[str]]:
+    """What `saved` reports of a page of `body`, so the capture is the live
+    page's, in a session that scans with `redactor` (by default, of the
+    test's bound secrets)."""
+    page = f"<!doctype html><meta charset=utf-8>{body}"
 
     async def scenario() -> tuple[str, list[str]]:
         scan = Redactor(bound(sites.app)) if redactor is None else redactor
@@ -218,6 +223,28 @@ def test_text_too_long_to_read_in_the_bound_withholds_it(
     assert reflected(sites, tmp_path, DENSE, font="10px sans-serif") == (
         "the image has more text than OCR reads in its bound",
         [],
+    )
+
+
+# 144 numbers far apart. Each is read at the recogniser's shortest, 320/48,
+# so the image's text is 960 long in any host's fonts.
+SPREAD = (
+    "<div style='display:grid;grid-template-columns:repeat(12,1fr);"
+    "grid-auto-rows:64px;font:16px sans-serif'>"
+    + "".join(f"<div>{place:03}</div>" for place in range(144))
+    + "</div>"
+)
+
+
+def test_an_image_just_under_the_most_text_ocr_reads_is_read_in_its_bound(
+    sites: Sites, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    at_the_cap = shown(sites, tmp_path, SPREAD)
+    monkeypatch.setattr(ocr, "TEXT_CAP", ocr.TEXT_CAP * 0.95)
+
+    assert (at_the_cap, shown(sites, tmp_path, SPREAD)) == (
+        ("saved", ["shots/0.png"]),
+        ("the image has more text than OCR reads in its bound", []),
     )
 
 
