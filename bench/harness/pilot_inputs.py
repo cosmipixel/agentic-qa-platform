@@ -135,12 +135,12 @@ def _prepare(
 ) -> tuple[str, ResetRequest | None, bool]:
     """The run's start origin, the spec's reset hook on it, and whether each
     test secret the spec references binds for it once replay admits `script`
-    (`_admitted`)."""
+    (`_secrets_bind`)."""
     start = start_origin(None, config)
-    return start, _reset(spec, start), _admitted(spec, config, script, start)
+    return start, _reset(spec, start), _secrets_bind(spec, config, script, start)
 
 
-def _admitted(
+def _secrets_bind(
     spec: Spec, config: ProjectConfig, script: CompiledScript, start: str
 ) -> bool:
     """Whether each test secret `spec` references binds for a run from
@@ -165,8 +165,9 @@ def _reset(spec: Spec, start: str) -> ResetRequest | None:
 def _covered(spec: Spec, script: CompiledScript) -> bool:
     """Whether `script` names `spec`, lists each expectation once, in order,
     with exactly the assertions that name it, realizes every required
-    condition, and declares a reset hook if a step has side effects, as the
-    pilot repeats every script: what admission asks beyond replay's."""
+    condition, and declares a reset hook if a step has side effects, since
+    the command repeats every script. Replay's admission checks none of
+    these (`_secrets_bind`)."""
     frontmatter = spec.frontmatter
     expect = range(len(frontmatter.expect))
     rows = script.coverage.expectations
