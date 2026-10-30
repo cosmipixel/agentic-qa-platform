@@ -70,6 +70,12 @@ def spells_a_value(png: bytes, redactor: Redactor) -> bool:
         raise TooMuchTextError
     rotated, _ = engine.cls_and_rotate(crops)
     text = "\n".join(engine.recognize_txt(rotated).txts or ())
-    # Also with every space taken out: a value shown in groups, or read in
-    # pieces, and OCR adds spaces of its own.
-    return redactor.finds(text) or redactor.finds("".join(text.split()))
+    # Also with every space taken out, of the text and then of the values
+    # too: a value shown in groups, or read in pieces, and OCR adds spaces
+    # of its own.
+    unspaced = "".join(text.split())
+    return (
+        redactor.finds(text)
+        or redactor.finds(unspaced)
+        or redactor.spaceless.finds(unspaced)
+    )

@@ -9,8 +9,11 @@ import re
 from base64 import b64encode, urlsafe_b64encode
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
+from functools import cached_property
 from itertools import product
 from typing import TYPE_CHECKING, Literal, Self
+
+from pydantic import SecretStr
 
 if TYPE_CHECKING:
     # `bound_secrets` imports this module, so a runtime import would be a cycle.
@@ -113,6 +116,19 @@ class Redactor:
     def empty(self) -> bool:
         """Whether this scan holds no secret: the run binds none."""
         return not self._secrets
+
+    @cached_property
+    def spaceless(self) -> Redactor:
+        """This scan of its values with their whitespace taken out, for text
+        read with its own taken out: OCR's, whose spaces aren't the image's
+        (ADR-0035)."""
+        return Redactor(
+            replace(
+                secret,
+                value=SecretStr("".join(secret.value.get_secret_value().split())),
+            )
+            for secret in self._secrets
+        )
 
     def covers(self, secret: BoundSecret) -> bool:
         """Whether both this secret's name and its value belong to this scan."""
