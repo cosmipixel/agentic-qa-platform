@@ -35,9 +35,9 @@ class TooMuchTextError(Exception):
 
 @cache
 def _engine(models: Path) -> RapidOCR:
-    """One engine a process, of the models in `models`. Its stages change
-    nothing it holds once its models are loaded, under its own locks, so one
-    runs in any thread."""
+    """One engine a process, of the models in `models`, which it loads on
+    first use under its own locks, so it is made in one thread and used in
+    another. Checks use it one at a time (`aqa_runner.screenshots`)."""
     return RapidOCR(
         params={
             "Det.model_path": str(models / DETECT),
