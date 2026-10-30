@@ -387,6 +387,18 @@ class PilotInputTests(unittest.TestCase):
         self.save(fresh=False)
         self.refuses(self.load, "invalid pilot input")
 
+    def test_a_bound_value_spelled_where_replay_uses_it_is_refused(self) -> None:
+        self.spec["preconditions"]["account"] = ACCOUNT
+        fill = {"seq": 1, "action": "fill", "target": "article", "side_effect": False}
+        self.data["steps"] = [fill | {"value": "fake-password-value"}]
+        self.save()
+        with patch.dict(os.environ, SECRET):
+            self.refuses(self.load, "invalid pilot input")
+            self.refuses(self.memory, "invalid pilot input")
+            self.data["steps"] = [fill | {"value": "text"}]
+            self.save()
+            self.assertEqual(self.memory().script.steps[0].action, "fill")
+
     def test_secret_admission_precedes_resource_use(self) -> None:
         self.assertEqual(self.ids(), ("pilot",))
         self.spec["preconditions"]["account"] = ACCOUNT
