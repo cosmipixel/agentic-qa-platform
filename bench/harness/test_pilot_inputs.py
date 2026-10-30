@@ -399,6 +399,15 @@ class PilotInputTests(unittest.TestCase):
             self.save()
             self.assertEqual(self.memory().script.steps[0].action, "fill")
 
+    def test_a_defect_elsewhere_in_admission_propagates(self) -> None:
+        defect = ValueError("fake admission defect")
+        self.enterContext(patch("aqa_runner.executor.accepted", side_effect=defect))
+        for call in (self.load, self.memory):
+            with self.subTest(seam=call.__name__):
+                with self.assertRaises(ValueError) as caught:
+                    call()
+                self.assertIs(caught.exception, defect)
+
     def test_secret_admission_precedes_resource_use(self) -> None:
         self.assertEqual(self.ids(), ("pilot",))
         self.spec["preconditions"]["account"] = ACCOUNT

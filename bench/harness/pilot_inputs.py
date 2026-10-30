@@ -147,9 +147,10 @@ def _admitted(
     `start`, once the executor admits `script` as replay does, before
     anything is opened (`aqa_runner.executor.admitted`, #239). Anything else
     it refuses is a SpecError, a binding the run doesn't allow included. A
-    value with surrogates fails to encode with a ValueError quoting it, so
-    the environment's errors are dropped."""
-    environment = (MissingSecretError, SecretLoggedError, ValueError)
+    value with surrogates fails to encode with a UnicodeEncodeError holding
+    it, so the binding's errors are dropped; any other ValueError is a
+    defect and propagates."""
+    environment = (MissingSecretError, SecretLoggedError, UnicodeEncodeError)
     bound = _quietly(partial(admitted, script, spec, config, start), *environment)
     return bound is not None
 
