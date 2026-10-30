@@ -24,7 +24,9 @@ RECOGNISE = "PP-OCRv6_rec_small.onnx"
 # batch's widest. Set on CI's runner, the slowest host, so that detecting
 # and reading an image at the cap takes half of `OCR_SECONDS` there:
 # floor((2.5 s - 0.346 s, its slowest detection) / 2.19 ms, its slowest
-# unit) (ADR-0035; Actions run 40747977277). Conduit's pages measure 132-280.
+# unit) (ADR-0035; Actions run 40747977277). The other half covers
+# classification, the first check's model load and a slower runner.
+# Conduit's pages measure 132-280.
 TEXT_CAP = 983
 
 
