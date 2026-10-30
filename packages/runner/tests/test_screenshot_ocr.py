@@ -266,6 +266,36 @@ def test_an_image_just_under_the_most_text_ocr_reads_is_read_in_its_bound(
     )
 
 
+# A line that runs off the screen, so as wide as it in any host's fonts,
+# about 55 long, above eleven numbers each read at the recogniser's
+# shortest. Read in batches of six, sorted, each as wide as its widest, the
+# image's text is about 370 long: the line's batch holds five of the
+# numbers. Read one a time, or each batch at its narrowest, it would be
+# under 250, and twelve a batch, over 500.
+LINE = "lorem ipsum dolor sit amet " * 20
+MIXED = (
+    "<div style='font:16px sans-serif'>"
+    f"<p style='margin:20px;white-space:nowrap'>{LINE}</p>"
+    "<div style='display:grid;grid-template-columns:repeat(4,1fr);"
+    "grid-auto-rows:64px'>"
+    + "".join(f"<div>{place:03}</div>" for place in range(11))
+    + "</div></div>"
+)
+
+
+def test_an_images_text_is_counted_as_the_recogniser_reads_it_in_batches(
+    sites: Sites, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ocr, "TEXT_CAP", 500)
+    under = shown(sites, tmp_path, MIXED)
+    monkeypatch.setattr(ocr, "TEXT_CAP", 250)
+
+    assert (under, shown(sites, tmp_path, MIXED)) == (
+        ("saved", ["shots/0.png"]),
+        ("the image has more text than OCR reads in its bound", []),
+    )
+
+
 def test_a_missing_model_file_saves_nothing_and_downloads_nothing(
     sites: Sites, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

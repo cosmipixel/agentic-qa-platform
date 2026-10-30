@@ -27,11 +27,6 @@ RECOGNISE = "PP-OCRv6_rec_small.onnx"
 # unit) (ADR-0035; Actions run 40747977277). Conduit's pages measure 132-280.
 TEXT_CAP = 983
 
-# RapidOCR 3.10.0's recogniser (its config.yaml, `Rec`): each line is read
-# 48 px high and at least 320 wide, six lines a batch.
-_SHORTEST = 320 / 48
-_BATCH = 6
-
 
 class TooMuchTextError(Exception):
     """An image with more text than OCR reads in its bound, found before
@@ -64,8 +59,11 @@ def spells_a_value(png: bytes, redactor: Redactor) -> bool:
     except RapidOCRError:
         # Its only error there: no text was detected.
         return False
-    widths = sorted(max(_SHORTEST, crop.shape[1] / crop.shape[0]) for crop in crops)
-    batches = batched(widths, _BATCH, strict=False)
+    # As the engine's recogniser reads them, by its config: each line `high`
+    # px high and at least `wide` wide, `rec_batch_num` lines a batch.
+    _, high, wide = engine.cfg.Rec.rec_img_shape
+    widths = sorted(max(wide / high, crop.shape[1] / crop.shape[0]) for crop in crops)
+    batches = batched(widths, engine.cfg.Rec.rec_batch_num, strict=False)
     if sum(len(batch) * batch[-1] for batch in batches) > TEXT_CAP:
         raise TooMuchTextError
     rotated, _ = engine.cls_and_rotate(crops)
