@@ -172,6 +172,18 @@ def test_a_percent_encoded_spelling_the_image_shows_is_dropped(
     assert reflected(sites, tmp_path, shown) == (SPELLED, [])
 
 
+# Turned over, which OCR's classifier sees and turns back before reading.
+def test_a_value_the_image_shows_upside_down_is_dropped(
+    sites: Sites, tmp_path: Path
+) -> None:
+    body = (
+        "<p style='display:inline-block;margin:20px;font:40px sans-serif;"
+        f"transform:rotate(180deg)'>{RED_VALUE}</p>"
+    )
+
+    assert shown(sites, tmp_path, body) == (SPELLED, [])
+
+
 # Split as a page may show a key, in groups: OCR reads the spaces too, and
 # can add some of its own.
 def test_a_value_the_image_shows_split_by_spaces_is_dropped(
