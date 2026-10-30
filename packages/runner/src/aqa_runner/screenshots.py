@@ -30,6 +30,7 @@ into an image, withholds it when OCR reads it whole."""
 import asyncio
 import html
 import re
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from dataclasses import InitVar, dataclass, field
@@ -63,6 +64,12 @@ ARCHIVE_CHARS = 130_000
 # text than it reads in this bound is withheld before recognition
 # (`aqa_runner.ocr.TEXT_CAP`), and the bound is the backstop.
 OCR_SECONDS = 5.0
+
+# One OCR check reads at a time. A check its bound cut off goes on in its
+# thread, on the process's one engine, whose detector writes state of its
+# own on every call (RapidOCR 3.10.0's `TextDetector.__call__`), so the
+# next waits for it inside its own bound rather than overlapping it.
+_OCR_TURN = threading.Lock()
 
 # A field's value that shares this many consecutive characters with a bound
 # value, or all of a shorter one, is dropped from a render. A test secret
@@ -420,7 +427,7 @@ async def _checked(png: bytes, redactor: Redactor) -> None:
         # In a thread, as the scrub is, so OCR holds up neither the event
         # loop nor the egress proxy on it.
         async with asyncio.timeout(OCR_SECONDS):
-            spelled = await asyncio.to_thread(ocr.spells_a_value, png, redactor)
+            spelled = await asyncio.to_thread(_read, png, redactor)
     except TimeoutError:
         reason = f"the image's OCR took over {OCR_SECONDS} s"
     except ocr.TooMuchTextError:
@@ -430,6 +437,11 @@ async def _checked(png: bytes, redactor: Redactor) -> None:
             return
         reason = "the image's text spells a bound value"
     raise ScreenshotWithheldError(reason)
+
+
+def _read(png: bytes, redactor: Redactor) -> bool:
+    with _OCR_TURN:
+        return ocr.spells_a_value(png, redactor)
 
 
 async def _captured(session: BrowserSession) -> bytes:

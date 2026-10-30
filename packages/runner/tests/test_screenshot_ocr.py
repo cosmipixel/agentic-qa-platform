@@ -4,6 +4,7 @@ rendered, is withheld, and the record saves nothing."""
 
 import asyncio
 import html
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -240,6 +241,39 @@ def test_ocr_past_its_bound_withholds_it(
     assert reflected(sites, tmp_path, UNBOUND) == (
         "the image's OCR took over 0.05 s",
         [],
+    )
+
+
+# A check its bound cut off goes on in its thread, on the process's one
+# engine. The next check waits for it inside its own bound, so the two
+# never overlap, and is withheld while it waits.
+def test_a_check_waits_for_one_its_bound_cut_off_and_is_withheld_meanwhile(
+    sites: Sites, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reading, release = threading.Event(), threading.Event()
+
+    def stuck_once(_png: bytes, _redactor: Redactor) -> bool:
+        if not reading.is_set():
+            reading.set()
+            release.wait(10)
+        return False
+
+    monkeypatch.setattr(ocr, "spells_a_value", stuck_once)
+    monkeypatch.setattr(screenshots, "OCR_SECONDS", 0.05)
+
+    async def scenario() -> tuple[tuple[str, list[str]], tuple[str, list[str]]]:
+        async with browsing(sites, redactor=Redactor(bound(sites.app))) as session:
+            await session.navigate(f"{sites.app}/kept")
+            record = RunRecord.create(tmp_path).redacting(session.redactor)
+            first = await saved(session, record)
+            await asyncio.to_thread(reading.wait, 10)
+            second = await saved(session, record)
+            release.set()
+            return first, second
+
+    assert asyncio.run(scenario()) == (
+        ("the image's OCR took over 0.05 s", []),
+        ("the image's OCR took over 0.05 s", []),
     )
 
 
