@@ -4,7 +4,6 @@ rendered, is withheld, and the record saves nothing."""
 
 import asyncio
 import html
-from base64 import b64encode
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -149,12 +148,27 @@ def test_a_live_page_that_shows_an_unbound_value_is_kept(
     assert reflected(sites, tmp_path, UNBOUND) == ("saved", ["shots/0.png"])
 
 
+# The red value, Zq7fakeSECx, in base64.
 def test_a_base64_spelling_the_image_shows_is_dropped(
     sites: Sites, tmp_path: Path
 ) -> None:
-    spelled = b64encode(RED_VALUE.encode()).decode()
+    assert reflected(sites, tmp_path, "WnE3ZmFrZVNFQ3g=") == (SPELLED, [])
 
-    assert reflected(sites, tmp_path, spelled) == (SPELLED, [])
+
+# The red value in capitals, as a page's text-transform can show it.
+def test_the_value_the_image_shows_in_another_case_is_dropped(
+    sites: Sites, tmp_path: Path
+) -> None:
+    assert reflected(sites, tmp_path, "ZQ7FAKESECX") == (SPELLED, [])
+
+
+# The red value with each byte percent-encoded, in capital hex.
+def test_a_percent_encoded_spelling_the_image_shows_is_dropped(
+    sites: Sites, tmp_path: Path
+) -> None:
+    shown = "%5A%71%37%66%61%6B%65%53%45%43%78"
+
+    assert reflected(sites, tmp_path, shown) == (SPELLED, [])
 
 
 # Split as a page may show a key, in groups: OCR reads the spaces too, and
@@ -162,9 +176,7 @@ def test_a_base64_spelling_the_image_shows_is_dropped(
 def test_a_value_the_image_shows_split_by_spaces_is_dropped(
     sites: Sites, tmp_path: Path
 ) -> None:
-    grouped = " ".join(RED_VALUE[start : start + 4] for start in range(0, 11, 4))
-
-    assert reflected(sites, tmp_path, grouped) == (SPELLED, [])
+    assert reflected(sites, tmp_path, "Zq7f akeS ECx") == (SPELLED, [])
 
 
 def phrased(sites: Sites) -> Redactor:
