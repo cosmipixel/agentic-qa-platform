@@ -167,18 +167,36 @@ def test_a_value_the_image_shows_split_by_spaces_is_dropped(
     assert reflected(sites, tmp_path, grouped) == (SPELLED, [])
 
 
+def phrased(sites: Sites) -> Redactor:
+    """A scan of one bound value with spaces in it."""
+    return Redactor(
+        [
+            BoundSecret(
+                "PHRASE",
+                SecretStr("fake pass phrase"),
+                SecretDestination((sites.app,), "password"),
+            )
+        ]
+    )
+
+
 # Read as OCR read it, too: with its spaces taken out, a value that has
 # some isn't the value.
 def test_a_value_with_spaces_in_it_the_image_shows_is_dropped(
     sites: Sites, tmp_path: Path
 ) -> None:
-    phrase = BoundSecret(
-        "PHRASE",
-        SecretStr("fake pass phrase"),
-        SecretDestination((sites.app,), "password"),
+    assert reflected(sites, tmp_path, "fake pass phrase", phrased(sites)) == (
+        SPELLED,
+        [],
     )
 
-    assert reflected(sites, tmp_path, "fake pass phrase", Redactor([phrase])) == (
+
+# Its word spaces and the page's own, which match neither the value as
+# written nor the value with OCR's spaces taken out of the text alone.
+def test_a_value_with_spaces_in_it_the_image_shows_in_groups_is_dropped(
+    sites: Sites, tmp_path: Path
+) -> None:
+    assert reflected(sites, tmp_path, "f a k e pass phrase", phrased(sites)) == (
         SPELLED,
         [],
     )
