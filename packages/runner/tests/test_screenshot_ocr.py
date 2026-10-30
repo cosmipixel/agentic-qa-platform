@@ -354,11 +354,23 @@ def test_an_images_text_is_counted_as_the_recogniser_reads_it_in_batches(
     )
 
 
+# Each of the three models missing, beside links to the other two: the
+# engine loads each by the path it is given, which no download replaces.
+@pytest.mark.parametrize(
+    "missing",
+    [ocr.DETECT, ocr.CLASSIFY, ocr.RECOGNISE],
+    ids=["detection", "classification", "recognition"],
+)
 def test_a_missing_model_file_saves_nothing_and_downloads_nothing(
-    sites: Sites, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    sites: Sites,
+    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    missing: str,
 ) -> None:
-    models = tmp_path / "models"
-    models.mkdir()
+    models = tmp_path_factory.mktemp("models")
+    for name in {ocr.DETECT, ocr.CLASSIFY, ocr.RECOGNISE} - {missing}:
+        (models / name).symlink_to(ocr.MODELS / name)
     monkeypatch.setattr(ocr, "MODELS", models)
 
     with pytest.raises(FileNotFoundError):
