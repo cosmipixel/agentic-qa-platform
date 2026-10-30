@@ -6,31 +6,19 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 
-from aqa_core.compiled import (
-    CompiledScript,
-    FillSecret,
-    Press,
-    ProbeEquals,
-    ProbeEqualsBaseline,
-    VisibleUnoccluded,
-)
+from aqa_core.compiled import CompiledScript
 from aqa_core.config import ProjectConfig
 from aqa_core.project import (
     SpecError,
-    contract_problems,
     load_compiled,
     load_project,
     path_on_origin,
     start_origin,
 )
 from aqa_core.schema import parse_origin
-from aqa_core.spec import Spec, secret_references
-from aqa_runner.bound_secrets import (
-    MissingSecretError,
-    SecretLoggedError,
-    bound_secrets,
-)
-from aqa_runner.browser_session import one_key
+from aqa_core.spec import Spec
+from aqa_runner.bound_secrets import MissingSecretError, SecretLoggedError
+from aqa_runner.executor import admitted
 
 
 class UnusableSecretError(ValueError):
@@ -104,19 +92,19 @@ def validate_pilot(
     source: Path,
     origin: str,
 ) -> PilotInput:
-    """`script`, already read strictly, admitted for `spec`: compiled from the
-    spec as it is now, covering each of its expectations, agreeing with the
-    project's subject contracts as replay requires (`contract_problems`),
-    runnable by the executor, reset by a valid hook when a step has side
-    effects, and with every test secret the spec references bound for this
-    run; values are read to check, never kept. The run may reach `origin`, the
-    app's stack, alone: base_url must be that origin, compared as origins, and
-    neither the spec nor the config may add another. Otherwise raises
-    ValueError naming `source` and a fixed category, checking the test secrets
-    last (UnusableSecretError, the environment's)."""
-    prepared = _quietly(partial(_prepare, spec, config), SpecError)
-    admitted = _admitted(spec, script) and not contract_problems(script, config)
-    if prepared is None or not admitted:
+    """`script`, already read strictly, admitted for `spec`: covering each of
+    its expectations, reset by a valid hook when a step has side effects, and
+    admitted as replay admits it (`aqa_runner.executor.admitted`): compiled
+    from the spec as it is now, agreeing with the project's subject
+    contracts, runnable by the executor, spelling no bound value where the
+    run would use it, and with every test secret the spec references bound
+    for this run; values are read to check, never kept. The run may reach
+    `origin`, the app's stack, alone: base_url must be that origin, compared
+    as origins, and neither the spec nor the config may add another.
+    Otherwise raises ValueError naming `source` and a fixed category,
+    checking the test secrets last (UnusableSecretError, the environment's)."""
+    prepared = _quietly(partial(_prepare, spec, config, script), SpecError)
+    if prepared is None or not _covered(spec, script):
         raise ValueError(f"{source}: invalid pilot input")
     start, reset, usable = prepared
     if start != parse_origin(origin):
@@ -143,17 +131,27 @@ def _quietly[T](read: Callable[[], T], *errors: type[Exception]) -> T | None:
 
 
 def _prepare(
-    spec: Spec, config: ProjectConfig
+    spec: Spec, config: ProjectConfig, script: CompiledScript
 ) -> tuple[str, ResetRequest | None, bool]:
     """The run's start origin, the spec's reset hook on it, and whether each
-    test secret the spec references binds for it (`bound_secrets`; a binding
-    it refuses is a SpecError). A value with surrogates fails to encode with
-    a ValueError quoting it, so the environment's errors are dropped."""
+    test secret the spec references binds for it once replay admits `script`
+    (`_admitted`)."""
     start = start_origin(None, config)
-    reset = _reset(spec, start)
+    return start, _reset(spec, start), _admitted(spec, config, script, start)
+
+
+def _admitted(
+    spec: Spec, config: ProjectConfig, script: CompiledScript, start: str
+) -> bool:
+    """Whether each test secret `spec` references binds for a run from
+    `start`, once the executor admits `script` as replay does, before
+    anything is opened (`aqa_runner.executor.admitted`, #239). Anything else
+    it refuses is a SpecError, a binding the run doesn't allow included. A
+    value with surrogates fails to encode with a ValueError quoting it, so
+    the environment's errors are dropped."""
     environment = (MissingSecretError, SecretLoggedError, ValueError)
-    bound = _quietly(partial(bound_secrets, spec, start), *environment)
-    return start, reset, bound is not None
+    bound = _quietly(partial(admitted, script, spec, config, start), *environment)
+    return bound is not None
 
 
 def _reset(spec: Spec, start: str) -> ResetRequest | None:
@@ -163,37 +161,24 @@ def _reset(spec: Spec, start: str) -> ResetRequest | None:
     return None if hook is None else ResetRequest(path_on_origin(start, hook.path))
 
 
-def _admitted(spec: Spec, script: CompiledScript) -> bool:
-    """Whether `script` records `spec` as it is now, lists each expectation
-    once, in order, with exactly the assertions that name it, realizes every
-    required condition, declares a reset hook if a step has side effects, and
-    holds only the steps and checks the executor runs (`aqa_runner.executor`,
-    #48)."""
+def _covered(spec: Spec, script: CompiledScript) -> bool:
+    """Whether `script` names `spec`, lists each expectation once, in order,
+    with exactly the assertions that name it, realizes every required
+    condition, and declares a reset hook if a step has side effects, as the
+    pilot repeats every script: what admission asks beyond replay's."""
     frontmatter = spec.frontmatter
-    probes = frontmatter.preconditions.probes
-    referenced = {name for _, name in secret_references(frontmatter)}
     expect = range(len(frontmatter.expect))
     rows = script.coverage.expectations
     listed = [set(row.assertions) for row in rows]
     named = [{a.id for a in script.assertions if a.expect_index == i} for i in expect]
     satisfied = {name for step in script.steps for name in step.satisfies}
-    steps, checks = script.steps, script.assertions
     return (
-        (script.spec_id, script.spec_hash) == (frontmatter.id, spec.spec_hash)
+        script.spec_id == frontmatter.id
         and [row.expect_index for row in rows] == list(expect)
         and listed == named
         and {condition.id for condition in script.coverage.requires} <= satisfied
-        and all(one_key(s.key) for s in steps if isinstance(s, Press))
-        and all(s.secret in referenced for s in steps if isinstance(s, FillSecret))
-        and all(
-            c.probe in probes
-            for c in checks
-            if isinstance(c, ProbeEquals | ProbeEqualsBaseline)
-        )
-        and script.probe_baselines.keys() <= probes.keys()
-        and all(c.in_viewport for c in checks if isinstance(c, VisibleUnoccluded))
         and (
             frontmatter.preconditions.reset is not None
-            or not any(step.side_effect for step in steps)
+            or not any(step.side_effect for step in script.steps)
         )
     )
