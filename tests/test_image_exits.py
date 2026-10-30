@@ -1,10 +1,11 @@
 """Only `aqa_runner.screenshots.take_screenshot` makes an image in the
 packages' source (`packages/*/src`), and it OCR-checks the PNG before a
 `Screenshot` holds it (#250, ADR-0035). Any other image capture there, as
-far as its spelling shows, fails here. With the `Screenshot` no other code
-can make and `RunRecord.write_screenshot`, which writes only one
-(`packages/runner/tests/test_screenshots.py`), no code path saves or sends
-an image that hasn't passed the check."""
+far as its spelling shows, fails here, and so does another module's
+reference to its raw captures or the key that makes a `Screenshot`. With
+the `Screenshot` no other code can make and `RunRecord.write_screenshot`,
+which writes only one (`packages/runner/tests/test_screenshots.py`), no
+code path saves or sends an image that hasn't passed the check."""
 
 import ast
 from pathlib import Path
@@ -64,6 +65,27 @@ def captures(tree: ast.AST) -> list[tuple[int, str]]:
     return found
 
 
+# The screenshots module's raw captures and the key that makes a Screenshot,
+# which hold or make an image before its OCR check.
+RAW = {"_captured", "_render", "_CAPTURED"}
+
+
+def reaches(tree: ast.AST) -> list[tuple[int, str]]:
+    """Each reference in `tree` to a raw capture or the key, imported,
+    aliased, through a module or by name: its line and the name."""
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        match node:
+            case (
+                ast.alias(name=name)
+                | ast.Attribute(attr=name)
+                | ast.Name(id=name)
+                | ast.Constant(value=str(name))
+            ) if name in RAW:
+                found.append((node.lineno, name))
+    return found
+
+
 def checked(tree: ast.Module) -> set[tuple[int, str]]:
     """The screenshots module's captures that are in their functions."""
     return {
@@ -77,16 +99,23 @@ def checked(tree: ast.Module) -> set[tuple[int, str]]:
 
 def refusals(root: Path) -> list[str]:
     """One refusal for each image capture in the packages' source under
-    `root`, outside the capture functions of the screenshots module."""
+    `root`, outside the capture functions of the screenshots module, and
+    for each reference to a raw capture or the key outside that module."""
     refused: list[str] = []
     for path in sorted(root.glob("packages/*/src/**/*.py")):
         tree = ast.parse(path.read_text())
-        allowed = checked(tree) if path == root / SCREENSHOTS else set()
+        screenshots = path == root / SCREENSHOTS
+        allowed = checked(tree) if screenshots else set()
         refused.extend(
             f"{path.relative_to(root)}:{line}: {name} makes an image outside "
             f"the checked capture: {HOW_TO_FIX}"
             for line, name in captures(tree)
             if (line, name) not in allowed
+        )
+        refused.extend(
+            f"{path.relative_to(root)}:{line}: {name} reaches an image before "
+            f"its check: {HOW_TO_FIX}"
+            for line, name in ([] if screenshots else reaches(tree))
         )
     return refused
 
@@ -220,6 +249,35 @@ def test_a_capture_elsewhere_in_the_screenshots_module_is_refused(
     assert [refusal.split(": ", 1)[0] for refusal in refusals(tmp_path)] == [
         f"{SCREENSHOTS}:{line}"
     ]
+
+
+# Another module that reaches the screenshots module's raw captures, or the
+# key that makes a Screenshot, has the image before the OCR check: by
+# import, alias, module access or name.
+BYPASSES = {
+    "import": "from aqa_runner.screenshots import _captured",
+    "alias": "from aqa_runner.screenshots import _captured as grab",
+    "module": "png = await screenshots._captured(session)",
+    "qualified": "png = await aqa_runner.screenshots._captured(session)",
+    "by-name": "grab = getattr(screenshots, '_captured')",
+    "render": "from aqa_runner.screenshots import _render",
+    "key": "shot = Screenshot(png, redactor, _key=screenshots._CAPTURED)",
+    "key-import": "from aqa_runner.screenshots import _CAPTURED as key",
+}
+
+
+@pytest.mark.parametrize("statement", BYPASSES.values(), ids=list(BYPASSES))
+def test_another_module_that_reaches_a_raw_capture_is_refused(
+    tmp_path: Path, statement: str
+) -> None:
+    plant(tmp_path, "packages/cli/src/aqa_cli/rogue.py", statement + "\n")
+
+    refused = refusals(tmp_path)
+
+    assert [refusal.split(": ", 1)[0] for refusal in refused] == [
+        "packages/cli/src/aqa_cli/rogue.py:1"
+    ]
+    assert "take_screenshot" in refused[0]
 
 
 def test_another_caller_of_a_capture_is_seen() -> None:
