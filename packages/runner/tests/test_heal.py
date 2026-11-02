@@ -1,6 +1,7 @@
 """The healer's turns on a drift (#244; ADR-0024's #244 amendment): real Chromium
 against #240's drift pages, a scripted model, through `replays.replay_run`."""
 
+import errno
 import json
 from collections.abc import Sequence
 from pathlib import Path
@@ -232,6 +233,20 @@ def test_a_turn_record_the_record_refuses_is_a_record_error(
 
     assert (basis(run).said, basis(run).stop) == (UNWRITTEN, "record_error")
     assert outcomes(run) == [(0, "completed"), (1, "drifted")]
+
+
+def test_evidence_the_disk_refuses_is_a_record_error_with_no_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def refused(*_: object) -> None:
+        raise OSError(errno.ENOSPC, "fake full disk")
+
+    monkeypatch.setattr(heal, "capture_evidence", refused)
+
+    run = healed(tmp_path, SHOW)
+
+    assert (basis(run).said, basis(run).stop) == (UNWRITTEN, "record_error")
+    assert run.requests() == []
 
 
 def test_a_page_that_cant_be_looked_at_ends_the_heal_with_no_call(

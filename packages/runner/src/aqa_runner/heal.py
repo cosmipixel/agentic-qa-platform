@@ -390,7 +390,8 @@ def _offered(
     rebound = script.targets[name].model_copy(update={"locators": locators})
     offered = script.model_copy(update={"targets": {**script.targets, name: rebound}})
     reported = ModelReported(call.confidence, context.line(call.rationale))
-    bound_as = context.line(f'{seen.role} "{seen.name}"')
+    named = f' "{seen.name}"' if seen.name else ""
+    bound_as = context.line(f"{seen.role or 'element'}{named}")
     return Offer(offered, Basis(bound_as, reported, None, context.folder))
 
 
