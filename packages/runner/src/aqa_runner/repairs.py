@@ -167,7 +167,7 @@ class Handing:
                 heal_patch_problems, self.committed, patched
             )
             if not problems:
-                problems = _ran_problems(patched, ran)
+                problems = _ran_problems(patched, ran, at)
             if not problems:
                 accepted(patched, self.spec)
                 taken = Repaired(at, misses, (), patched)
@@ -187,19 +187,25 @@ class Handing:
         return refused
 
 
-def _ran_problems(patched: CompiledScript, ran: Sequence[Step]) -> list[str]:
-    """Why `patched` doesn't begin with `ran`, the steps that ran, as the
-    script in use holds them. The validator reads only the committed
-    script, so this also keeps an earlier repair's inserted steps that ran
-    as they ran: what the record holds as run must be what ran."""
+def _ran_problems(patched: CompiledScript, ran: Sequence[Step], at: At) -> list[str]:
+    """Why `patched` changes what ran, `ran` as the script in use holds its
+    steps. The validator reads only the committed script, so this also keeps
+    an earlier repair's inserted steps that ran as they ran: what the record
+    holds as run must be what ran. Every step has run by the time an
+    assertion drifts, so its repair inserts none."""
     kept = patched.steps[: len(ran)]
     if [step.seq for step in kept] != [step.seq for step in ran]:
         return ["/steps: a repair inserts no step before a step that already ran"]
-    return [
+    problems = [
         f"/steps/{index}: a repair rewrites no step that already ran"
         for index, (now, was) in enumerate(zip(kept, ran, strict=True))
         if now.model_dump(mode="json") != was.model_dump(mode="json")
     ]
+    if isinstance(at, AssertionAt) and len(patched.steps) > len(ran):
+        problems.append(
+            "/steps: an assertion's repair inserts no step: every step has run"
+        )
+    return problems
 
 
 def _repair_record(repaired: Repaired) -> dict[str, object]:

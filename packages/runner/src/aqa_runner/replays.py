@@ -58,7 +58,7 @@ async def replay_run(
     within `resolve_seconds` (`aqa_runner.reset.reset`), then enter
     `opening()` and replay `script` in what it yields (`executor.replay`):
     with every locator at each use when `every_locator`, else first-match,
-    and with a drifted step handed to `repair` when given (#242).
+    and with a drift handed to `repair` when given (#242, #244).
     A failed reset raises `ResetFailedError` before `opening` is entered, so
     no browser starts before the reset passed. What replay raises reaches
     `opening`'s exit, so the caller can tell it before what it opened

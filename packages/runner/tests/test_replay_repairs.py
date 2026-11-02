@@ -6,7 +6,7 @@ Real Chromium against #240's drift pages, with every locator, as heal runs."""
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +43,7 @@ from packages.runner.tests.secret_fixtures import (
 )
 from packages.runner.tests.test_every_locator import around
 
+MOVED = page("moved")
 # How the toggle drifts on the moved page: its role locator still finds it,
 # its toolbar-scoped css locator finds nothing.
 MISSES: tuple[Miss, ...] = ("not unanimous", "no match")
@@ -75,14 +76,16 @@ def shipping_spec(root: Path) -> Path:
 
 def repairing(
     tmp_path: Path,
-    offer: Callable[[Drift], CompiledScript],
+    offer: Callable[[Drift], CompiledScript | Awaitable[CompiledScript]],
     *,
     script: CompiledScript = DETAILS,
     spec_at: Callable[[Path], Path] = shipping_spec,
+    html: str = MOVED,
 ) -> Repairing:
-    """`script` replayed with every locator on the moved page, for the spec
-    `spec_at` writes under a spec root, with a repair that notes each drift
-    and offers what `offer` gives for it."""
+    """`script` replayed with every locator on `html`, the moved page unless
+    a test composes another, for the spec `spec_at` writes under a spec root,
+    with a repair that notes each drift and offers what `offer` gives for it,
+    awaited when it is a look at the page first."""
     path = spec_at(tmp_path / "qa")
     config = load_config(path.parent / "config.yaml")
     spec = load_spec(path, config)
@@ -94,9 +97,10 @@ def repairing(
 
     async def repair(drift: Drift) -> CompiledScript:
         handed.append(drift)
-        return offer(drift)
+        offered = offer(drift)
+        return await offered if isinstance(offered, Awaitable) else offered
 
-    with serving(page("moved")) as app:
+    with serving(html) as app:
         run_gate = gate(allowed=(app.origin,))
 
         @asynccontextmanager
@@ -152,8 +156,8 @@ def test_a_repaired_step_runs_again_and_every_assertion_is_evaluated(
     ]
 
 
-def document(run: Repairing, seq: int) -> object:
-    return json.loads((run.record / f"repairs/{seq}.json").read_text())
+def document(run: Repairing, key: int | str) -> object:
+    return json.loads((run.record / f"repairs/{key}.json").read_text())
 
 
 def repairs(run: Repairing) -> list[tuple[object, ...]]:
