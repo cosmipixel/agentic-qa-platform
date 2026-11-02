@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from aqa_core.compiled import NotVisible, Select, Target, VisibleUnoccluded
+from aqa_core.compiled import Click, NotVisible, Select, Target, VisibleUnoccluded
 from aqa_runner.evaluation import AssertionResult
 from aqa_runner.executor import RunResult, StepResult
 from aqa_runner.redaction import NO_SECRETS
@@ -35,6 +35,7 @@ from packages.runner.tests.test_replay_result import (
     made,
     rebinding,
     the_click,
+    violated,
 )
 
 
@@ -163,6 +164,102 @@ def test_an_assertion_on_a_rebound_target_that_fails_is_a_violation_citing_the_h
     assert entry["finding"]["category"] == "visual"
     assert entry["heal"] == HEAL_CITED
     assert document(end)["exit_code"] == 1
+
+
+def test_a_finding_lists_each_step_on_the_rebound_set_and_no_other(
+    tmp_path: Path,
+) -> None:
+    """Steps 1 and 3 ran through `save`, which heal rebound; step 2 through `other`,
+    which it didn't. The failed check reads neither."""
+    run = made(tmp_path)
+    other = Target.model_validate(
+        {"semantic": "another button", "locators": [{"css": "i"}]}
+    )
+    steps = tuple(
+        Click.model_validate(
+            {"seq": seq, "action": "click", "target": target, "side_effect": False}
+        )
+        for seq, target in ((1, "save"), (2, "other"), (3, "save"))
+    )
+    update = {"steps": steps, "targets": {**run.script.targets, "other": other}}
+    run = replace(run, script=run.script.model_copy(update=update))
+
+    end = ending(
+        run,
+        steps=(StepResult(2, "completed"), StepResult(3, "completed")),
+        assertions=(AssertionResult("a2", "failed", locator_index=0),),
+        **healing_the_step(run),
+    )
+
+    assert judged(end, "assertion", "a2")["finding"] == {
+        "category": "functional",
+        "title": "The form is saved",
+        "repro_steps": [0, 1, 2, 3],
+        "rebound_steps": [1, 3],
+    }
+
+
+def test_a_finding_on_a_repaired_assertion_alone_lists_no_step(tmp_path: Path) -> None:
+    """Its own `heal` cites the repair, and no step went through the new binding."""
+    run = made(tmp_path)
+    check = VisibleUnoccluded.model_validate(
+        {
+            "id": "a5",
+            "expect_index": 0,
+            "check": "visible_unoccluded",
+            "target": "status",
+            "min_size_px": [1, 1],
+            "in_viewport": True,
+        }
+    )
+    status = Target.model_validate({"semantic": "a status", "locators": [{"css": "i"}]})
+    update = {
+        "targets": {**run.script.targets, "status": status},
+        "assertions": [*run.script.assertions, check],
+    }
+    run = replace(run, script=run.script.model_copy(update=update))
+    taken = Repaired(
+        AssertionAt(4, check),
+        MISSED,
+        (),
+        rebinding(run.script, status=NEW_SAVE),
+        Basis(BOUND_AS, REPORTED, None, "heals/assertion-4"),
+    )
+
+    end = ending(
+        run,
+        assertions=(AssertionResult("a5", "failed", locator_index=0),),
+        repairs=(taken,),
+        base=BLOB,
+    )
+
+    entry = judged(end, "assertion", "a5")
+    assert entry["finding"]["rebound_steps"] == []
+    assert entry["heal"]["repair"] == "repairs/assertion-4.json"
+
+
+def test_a_step_that_drifted_again_is_not_listed_in_a_finding(tmp_path: Path) -> None:
+    """It acted through nothing, so its binding can't be why the invariant failed."""
+    run = made(tmp_path)
+    taken = repaired_step(
+        run,
+        script=rebinding(run.script, save=NEW_SAVE),
+        basis=Basis(BOUND_AS, REPORTED, None, "heals/1"),
+    )
+
+    end = replace(
+        ending(run, base=BLOB),
+        result=replace(
+            cast_result(ending(run)),
+            steps=(StepResult(0, "completed"), StepResult(1, "drifted", misses=MISSED)),
+            assertions=(),
+            repairs=(taken,),
+            **violated("console_errors"),
+        ),
+    )
+
+    entry = judged(end, "invariant", "console_errors")
+    assert entry["finding"]["rebound_steps"] == []
 
 
 def with_the_check_on_save_called(run: Made, name: str) -> Made:

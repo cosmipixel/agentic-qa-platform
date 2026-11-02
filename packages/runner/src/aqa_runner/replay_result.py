@@ -291,6 +291,15 @@ class _Judged:
         ruling = {"verdict": verdict, "reason": reason, "heal": heal}
         return replace(self, verdict=verdict, entry=self.entry | ruling)
 
+    def listing(self, rebound_steps: list[int | str]) -> _Judged:
+        """This verdict, whose finding, if it has one, lists each step heal
+        rebound, since a wrong rebinding could be the finding's cause (#245)."""
+        finding = self.entry["finding"]
+        if not isinstance(finding, dict):
+            return self
+        listed = finding | {"rebound_steps": rebound_steps}
+        return replace(self, entry=self.entry | {"finding": listed})
+
 
 def _judged(end: ReplayEnd) -> list[_Judged]:
     """Each step's verdict, then each assertion's and each enabled
@@ -498,7 +507,16 @@ class _Healed:
         passes and nothing troubled it is a subject on the rebound set
         `drift_consistent`; with none on it, the run just passed."""
         passed = self.untroubled and all(each.verdict == "pass" for each in judged)
-        return [self._marked(each, passed=passed) for each in judged]
+        rebound_steps = [
+            each.subject.name
+            for each in judged
+            if each.subject.kind == "step"
+            and each.drift is None
+            and self.targets.get(each.subject) in self.rebound
+        ]
+        return [
+            self._marked(each, passed=passed).listing(rebound_steps) for each in judged
+        ]
 
     def _marked(self, judged: _Judged, *, passed: bool) -> _Judged:
         """`judged`, with its `heal`: a drift says what became of its repair; a
