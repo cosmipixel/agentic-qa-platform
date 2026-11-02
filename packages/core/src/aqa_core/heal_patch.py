@@ -6,7 +6,11 @@ of the file it applies to, and its id (ADR-0024's #243 and #244 amendments)."""
 
 import hashlib
 import json
+import re
 from collections.abc import Iterator, Sequence
+from typing import Final, Literal
+
+from pydantic import JsonValue, StrictStr
 
 from aqa_core.compiled import (
     ByCss,
@@ -21,7 +25,8 @@ from aqa_core.compiled import (
     css_strings,
     css_tokens,
 )
-from aqa_core.project import locator_levels
+from aqa_core.project import SpecError, locator_levels
+from aqa_core.schema import StrictModel
 from aqa_core.text import SearchTimeoutError, any_has_pattern
 
 # The child-indexed pseudo-classes, typed or not (Selectors Level 4, §13.3
@@ -313,3 +318,75 @@ def literal_claim_spelled(locator: Locator, claims: Sequence[TextInTarget]) -> b
         for claim in claims
         if claim.pattern is None
     )
+
+
+# RFC 6901's array index, at most nine digits, as a `json_path`'s is (DATA_MODEL
+# §7), and a `~` that escapes nothing.
+_INDEX: Final = re.compile(r"0|[1-9][0-9]{0,8}")
+_BARE_TILDE: Final = re.compile(r"~(?![01])")
+
+
+class PatchOp(StrictModel):
+    """One change a proposal asks for: RFC 6902's `add` and `replace`, the two a
+    heal writes. A proposal file is untrusted input, so `remove`, `move`, `copy`,
+    `test` and any other member are refused rather than ignored."""
+
+    op: Literal["add", "replace"]
+    path: StrictStr
+    value: JsonValue
+
+
+def apply_patch(document: object, patch: Sequence[PatchOp]) -> None:
+    """Apply `patch` to `document`, parsed JSON, in place and in order, each path
+    read against what the last change left (RFC 6902). Any path is followed:
+    `heal_patch_problems` judges the result, so what a path may name isn't decided
+    here. A path it can't follow is a `SpecError`, naming that path."""
+    for change in patch:
+        *parents, last = _parts(change.path)
+        at = document
+        for part in parents:
+            at = _child(at, part, change.path)
+        _changed(at, last, change)
+
+
+def _unfollowed(path: str) -> SpecError:
+    return SpecError([f"{path}: a patch can't follow this path"])
+
+
+def _parts(path: str) -> list[str]:
+    """`path`'s parts, decoded in RFC 6901's order, so `~01` is `~1`.
+    The empty pointer, the whole document, is no change a heal makes."""
+    if not path.startswith("/") or _BARE_TILDE.search(path):
+        raise _unfollowed(path)
+    return [part.replace("~1", "/").replace("~0", "~") for part in path[1:].split("/")]
+
+
+def _child(at: object, part: str, path: str) -> object:
+    if isinstance(at, dict) and part in at:
+        return at[part]
+    if isinstance(at, list) and (index := _position(part, len(at) - 1)) is not None:
+        return at[index]
+    raise _unfollowed(path)
+
+
+def _changed(at: object, part: str, change: PatchOp) -> None:
+    if isinstance(at, dict) and (change.op == "add" or part in at):
+        at[part] = change.value
+    elif isinstance(at, list) and change.op == "add":
+        index = len(at) if part == "-" else _position(part, len(at))
+        if index is None:
+            raise _unfollowed(change.path)
+        at.insert(index, change.value)
+    elif isinstance(at, list) and (index := _position(part, len(at) - 1)) is not None:
+        at[index] = change.value
+    else:
+        raise _unfollowed(change.path)
+
+
+def _position(part: str, last: int) -> int | None:
+    """The array index `part` spells, RFC 6901's digits and no others, or None
+    when it spells none or one past `last`. `int` alone would take `-1`, `1_0`,
+    `٣` and a space, and refuse more digits than it reads."""
+    if _INDEX.fullmatch(part) is None or int(part) > last:
+        return None
+    return int(part)
