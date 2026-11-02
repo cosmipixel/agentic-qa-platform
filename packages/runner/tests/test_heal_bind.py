@@ -29,7 +29,7 @@ from playwright.async_api import Error, Page
 
 from packages.runner.tests.drift_fixtures import BUTTON, DETAILS, SUMMARY
 from packages.runner.tests.executor_fixtures import compiled, read_steps
-from packages.runner.tests.explore_graph_fixtures import calling, ref
+from packages.runner.tests.explore_graph_fixtures import NO_RESPONSE, calling, ref
 from packages.runner.tests.heal_fixtures import (
     FOUND_NONE,
     MOVED,
@@ -573,6 +573,66 @@ def test_a_pick_inside_the_region_that_isnt_the_part_asks_for_no_config_edit(
 
     assert "the subject check refused this element (not_the_part)" in run.requests()[1]
     assert basis(run).said == FOUND_NONE
+
+
+def test_a_pick_of_the_wrong_part_keeps_what_an_outside_pick_said(
+    tmp_path: Path,
+) -> None:
+    """One pick was outside the region, so the subject may have moved, whatever the
+    later ones were."""
+    run = healed(
+        tmp_path,
+        THE_SUMMARY,
+        rebinding("button", "Go"),
+        NO_TOOL,
+        script=contracted("header#toolbar", "p"),
+        html=SHOWN.replace(
+            '<header id="toolbar">', '<header id="toolbar"><p>Hi</p><button>Go</button>'
+        ),
+        config=contract_config("header#toolbar", "p"),
+    )
+
+    assert "the subject check refused this element (not_the_part)" in run.requests()[2]
+    assert basis(run).said == f"{FOUND_NONE}; {OUTSIDE_ITS_REGION}"
+
+
+def test_a_page_refused_after_an_outside_pick_says_the_config_edit_once(
+    tmp_path: Path,
+) -> None:
+    run = healed(
+        tmp_path,
+        THE_SUMMARY,
+        rebinding("paragraph", "Hi"),
+        script=contracted("header#toolbar", "em"),
+        html=SHOWN.replace('<header id="toolbar">', '<header id="toolbar"><p>Hi</p>'),
+        config=contract_config("header#toolbar", "em"),
+    )
+
+    assert (
+        "the subject check refused this element (outside_region)" in run.requests()[1]
+    )
+    assert basis(run).said == (
+        "the subject contract refuses this page (part_absent); "
+        "heal never changes a contract, so a reviewed config edit is needed"
+    )
+
+
+def test_a_model_that_stops_answering_after_an_outside_pick_asks_for_no_config_edit(
+    tmp_path: Path,
+) -> None:
+    """The run stopped on the model, which no config edit mends."""
+    run = healed(
+        tmp_path,
+        THE_SUMMARY,
+        NO_RESPONSE,
+        script=contracted("header#toolbar", "p"),
+        html=SHOWN.replace('<header id="toolbar">', '<header id="toolbar"><p>Hi</p>'),
+        config=contract_config("header#toolbar", "p"),
+    )
+
+    written = run.document
+    assert (written["outcome"], written["exit_code"]) == ("no_response", 11)
+    assert written["reasons"][0] == "the model gave no response (APIConnectionError)"
 
 
 def test_a_look_the_page_changes_under_is_made_again_on_the_held_element(
