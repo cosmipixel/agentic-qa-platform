@@ -353,6 +353,8 @@ class FixtureTests(unittest.TestCase):
     def test_fixture_original_and_rebound_admission_stay_confined(self) -> None:
         (admitted,) = load_pilots(QA, FIXTURES, ("read-article",), origin=ORIGIN)
         self.assertEqual((admitted.script, admitted.start), (self.script, ORIGIN))
+        hook = admitted.spec.frontmatter.preconditions.reset
+        self.assertEqual(hook and hook.path, "/test-api/reset?fixture=seed")
         base = canonical_hash(self.script.model_dump(mode="json"))
         same = {
             "op": "replace",
