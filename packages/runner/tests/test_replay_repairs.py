@@ -75,6 +75,22 @@ def shipping_spec(root: Path) -> Path:
     return order_spec(root, SHIPPING)
 
 
+def secret_spec_at(root: Path) -> Path:
+    """The order spec, whose account's password is the test secret
+    TEST_PASSWORD, which its config binds at the start origin."""
+    path = order_spec(root, SHIPPING)
+    (root / "config.yaml").write_text(
+        f"budgets: {{ resolve_seconds: 1 }}\nsecrets: {{ {BOUND_AT_START} }}\n"
+    )
+    account = "{ email: reader@example.test, password: { secret: TEST_PASSWORD } }"
+    path.write_text(
+        path.read_text().replace(
+            "preconditions:\n", f"preconditions:\n  account: {account}\n"
+        )
+    )
+    return path
+
+
 def repairing(
     tmp_path: Path,
     offer: Callable[[Drift], CompiledScript | Awaitable[CompiledScript]],
@@ -441,37 +457,128 @@ CLICKED_TWICE = fx.compiled(
     [CLICK_TOGGLE, {**CLICK_TOGGLE, "seq": 2}], targets={"toggle": TOGGLE}
 )
 RENAMED: tuple[Miss, ...] = ("no match", "not unanimous")
-NO_REPAIR = (
-    "/targets/toggle: a step that already ran acted through this target, so it "
-    "goes to no repair"
+# A select, then a password field, each renamed by the step that acts through
+# it, and seen under the name it no longer has.
+RENAMED_BY_ITS_SELECT = """<select aria-label="Size"
+    onchange="this.setAttribute('aria-label', 'Chosen')">
+    <option>S</option><option>M</option>
+</select>"""
+SELECTED_THEN_SEEN = fx.compiled(
+    [
+        {
+            "seq": 1,
+            "action": "select",
+            "target": "size",
+            "option": "M",
+            "side_effect": False,
+        }
+    ],
+    targets={
+        "size": {
+            "semantic": "the order's size",
+            "locators": [fx.by_role("combobox", "Size"), {"css": "select"}],
+        }
+    },
+    assertions=[seen_on("size", "a1")],
 )
+RENAMED_BY_ITS_FILL = """<input type="password" aria-label="Password"
+    oninput="this.setAttribute('aria-label', 'Filled')">"""
+FILLED_THEN_SEEN = fx.compiled(
+    [
+        {
+            "seq": 1,
+            "action": "fill_secret",
+            "target": "field",
+            "secret": "TEST_PASSWORD",
+            "side_effect": False,
+        }
+    ],
+    targets={
+        "field": {
+            "semantic": "the account's password field",
+            "locators": [{"label": "Password"}, {"css": "input"}],
+        }
+    },
+    assertions=[seen_on("field", "a1")],
+)
+
+
+@dataclass(frozen=True)
+class UsedThenDrifted:
+    """A script with a step that acts through the target `name`, which then
+    drifts on `html`, and the record `key`, which names that drift's `subject`."""
+
+    script: CompiledScript
+    html: str
+    name: str
+    key: str
+    subject: dict[str, object]
+    spec_at: Callable[[Path], Path] = shipping_spec
 
 
 @pytest.mark.parametrize(
-    ("script", "key", "subject"),
+    "used",
     [
         pytest.param(
-            CLICKED_THEN_SEEN, "assertion-0", {"assertion": "a1"}, id="assertion"
+            UsedThenDrifted(
+                CLICKED_THEN_SEEN,
+                RENAMES_ITSELF,
+                "toggle",
+                "assertion-0",
+                {"assertion": "a1"},
+            ),
+            id="assertion",
         ),
-        pytest.param(CLICKED_TWICE, "2", {"seq": 2}, id="step"),
+        pytest.param(
+            UsedThenDrifted(CLICKED_TWICE, RENAMES_ITSELF, "toggle", "2", {"seq": 2}),
+            id="step",
+        ),
+        pytest.param(
+            UsedThenDrifted(
+                SELECTED_THEN_SEEN,
+                RENAMED_BY_ITS_SELECT,
+                "size",
+                "assertion-0",
+                {"assertion": "a1"},
+            ),
+            id="after_a_select",
+        ),
+        pytest.param(
+            UsedThenDrifted(
+                FILLED_THEN_SEEN,
+                RENAMED_BY_ITS_FILL,
+                "field",
+                "assertion-0",
+                {"assertion": "a1"},
+                secret_spec_at,
+            ),
+            id="after_a_fill_secret",
+        ),
     ],
 )
 def test_a_drift_on_a_target_a_step_already_used_goes_to_no_repair(
-    tmp_path: Path, script: CompiledScript, key: str, subject: dict[str, object]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, used: UsedThenDrifted
 ) -> None:
+    monkeypatch.setenv("AQA_SECRET_TEST_PASSWORD", FAKE_VALUE)
+
     run = repairing(
         tmp_path,
         lambda drift: rebound(drift.script),
-        script=script,
-        html=RENAMES_ITSELF,
+        script=used.script,
+        spec_at=used.spec_at,
+        html=used.html,
     )
 
+    problem = (
+        f"/targets/{used.name}: a step that already ran acted through this target, "
+        "so it goes to no repair"
+    )
     assert run.handed == []
-    assert repairs(run) == [(key, RENAMED, (NO_REPAIR,), None)]
-    assert document(run, key) == {
-        **subject,
+    assert repairs(run) == [(used.key, RENAMED, (problem,), None)]
+    assert document(run, used.key) == {
+        **used.subject,
         "misses": ["no match", "not unanimous"],
-        "problems": [NO_REPAIR],
+        "problems": [problem],
         "script": None,
     }
 
@@ -592,22 +699,6 @@ def test_a_repair_that_inserts_a_step_before_one_that_ran_is_refused(
         (1, "completed", ()),
         (2, "drifted", MISSES),
     ]
-
-
-def secret_spec_at(root: Path) -> Path:
-    """The order spec, whose account's password is the test secret
-    TEST_PASSWORD, which its config binds at the start origin."""
-    path = order_spec(root, SHIPPING)
-    (root / "config.yaml").write_text(
-        f"budgets: {{ resolve_seconds: 1 }}\nsecrets: {{ {BOUND_AT_START} }}\n"
-    )
-    account = "{ email: reader@example.test, password: { secret: TEST_PASSWORD } }"
-    path.write_text(
-        path.read_text().replace(
-            "preconditions:\n", f"preconditions:\n  account: {account}\n"
-        )
-    )
-    return path
 
 
 def held(tmp_path: Path, value: str, run: Repairing) -> list[str]:
