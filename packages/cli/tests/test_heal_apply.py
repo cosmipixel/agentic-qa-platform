@@ -8,6 +8,7 @@ import fcntl
 import json
 from collections.abc import Callable
 from pathlib import Path
+from stat import S_IMODE
 from typing import Any
 
 import pytest
@@ -52,6 +53,22 @@ def test_apply_changes_only_the_paths_it_names(
         f"applied {proposal} order: {target}\n  /targets/toggle/locators\n"
     )
     assert result.stderr == ""
+
+
+@pytest.mark.parametrize("mode", [0o755, 0o600])
+def test_apply_keeps_the_files_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: int
+) -> None:
+    """`git diff` would show a changed mode, a path the proposal doesn't name."""
+    root = tmp_path / "qa"
+    target = committed(root)
+    target.chmod(mode)
+    proposal = recorded(root, REBIND)
+
+    result = apply(root, monkeypatch, proposal)
+
+    assert result.exit_code == 0, result.output
+    assert S_IMODE(target.stat().st_mode) == mode
 
 
 def test_apply_prints_each_path_of_its_patch(
