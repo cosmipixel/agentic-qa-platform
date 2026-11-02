@@ -618,6 +618,8 @@ def test_an_assertion_target_whose_text_is_checked_is_located_by_no_name(
 
     run = healed(tmp_path, THE_SUMMARY, script=script, html=SHOWN)
 
+    # A paragraph's text is no name, so it is bound by its role alone.
+    assert basis(run).said == "paragraph"
     assert locators_of(run, "summary") == [
         {"css": "#summary"},
         {"role": "paragraph"},
