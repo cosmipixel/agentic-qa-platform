@@ -15,6 +15,7 @@ from aqa_core.compiled import Click, CompiledScript, Target
 from aqa_runner import browser_session, executor
 from aqa_runner.bound_secrets import BoundSecret
 from aqa_runner.browser_session import BrowserSession
+from aqa_runner.document_origins import isolated_origin
 from aqa_runner.evaluation import Evaluation, look_for
 from aqa_runner.locators import Resolved, Unresolved
 from aqa_runner.repairs import Drift
@@ -444,13 +445,11 @@ def test_a_fill_secret_whose_binding_check_the_page_never_answers_fails_with_no_
 def test_a_fill_secret_whose_page_goes_busy_under_its_origin_read_fails_with_no_intent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    original = browser_session.isolated_origin
-
     async def going_busy(page: Page) -> str | None:
         await page.evaluate(GOES_BUSY)
         # So the read that hangs is the origin's, under its CDP session.
         await asyncio.sleep(0.2)
-        return await original(page)
+        return await isolated_origin(page)
 
     monkeypatch.setattr(browser_session, "isolated_origin", going_busy)
 
