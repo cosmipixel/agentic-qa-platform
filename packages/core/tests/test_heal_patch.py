@@ -8,13 +8,15 @@ import pytest
 from aqa_core import text
 from aqa_core.compiled import ByCss, ByTestId, CompiledScript, TextInTarget
 from aqa_core.heal_patch import (
+    PatchOp,
+    apply_patch,
     blob_sha,
     heal_patch_problems,
     json_patch,
     literal_claim_spelled,
     proposal_id,
 )
-from aqa_core.project import parse_compiled
+from aqa_core.project import SpecError, parse_compiled
 
 from packages.core.tests.test_compiled import data_models_example
 from packages.core.tests.test_load_compiled import DECLARES_TEST_PASSWORD
@@ -637,17 +639,8 @@ def test_a_heal_changes_nothing_outside_targets_and_steps(
     ]
 
 
-def applied(document: dict[str, Any], patch: list[dict[str, Any]]) -> dict[str, Any]:
-    """`document` with each RFC 6902 `replace` of `patch` applied, as a person's
-    tool would, knowing nothing of how the patch was made."""
-    for change in patch:
-        assert change["op"] == "replace"
-        *parents, last = change["path"].removeprefix("/").split("/")
-        at = document
-        for token in parents:
-            at = at[token.replace("~1", "/").replace("~0", "~")]
-        at[last.replace("~1", "/").replace("~0", "~")] = change["value"]
-    return document
+def ops(*changes: dict[str, Any]) -> list[PatchOp]:
+    return [PatchOp.model_validate(change) for change in changes]
 
 
 def rebinds_email_and_a_named_target(data: dict[str, Any]) -> None:
@@ -684,9 +677,9 @@ def test_json_patch_replaces_each_rebound_targets_locators() -> None:
             "value": [{"css": "#b"}],
         },
     ]
-    assert applied(committed.model_dump(mode="json", exclude_none=True), patch) == (
-        final.model_dump(mode="json", exclude_none=True)
-    )
+    document = committed.model_dump(mode="json", exclude_none=True)
+    apply_patch(document, ops(*patch))
+    assert document == final.model_dump(mode="json", exclude_none=True)
 
 
 def test_json_patch_of_a_script_with_its_own_locators_is_empty() -> None:
@@ -724,6 +717,114 @@ def test_proposal_id_reads_a_values_keys_in_sorted_order() -> None:
     # "/targets/toggle/locators","value":[{"name":"Save","role":"button"}]}],
     # "spec_id":"order"}.
     assert proposal_id("order", "abc123", patch) == "ah_b314df31871b"
+
+
+@pytest.mark.parametrize(
+    ("path", "steps"),
+    [
+        ("/steps/0", ["new", "a", "b"]),
+        ("/steps/1", ["a", "new", "b"]),
+        ("/steps/2", ["a", "b", "new"]),
+        ("/steps/-", ["a", "b", "new"]),
+    ],
+)
+def test_apply_patch_inserts_a_step_by_its_position(
+    path: str, steps: list[str]
+) -> None:
+    document = {"steps": ["a", "b"]}
+
+    apply_patch(document, ops({"op": "add", "path": path, "value": "new"}))
+
+    assert document == {"steps": steps}
+
+
+def test_apply_patch_replaces_a_member_or_an_item_where_it_stands() -> None:
+    document: dict[str, Any] = {"first": 1, "steps": ["a", "b"], "last": 2}
+
+    apply_patch(
+        document,
+        ops(
+            {"op": "replace", "path": "/first", "value": 3},
+            {"op": "replace", "path": "/steps/1", "value": "c"},
+        ),
+    )
+
+    assert document == {"first": 3, "steps": ["a", "c"], "last": 2}
+    assert list(document) == ["first", "steps", "last"]
+
+
+def test_apply_patch_adds_a_member_after_the_others() -> None:
+    document = {"targets": {"a": 1, "b": 2}}
+
+    apply_patch(document, ops({"op": "add", "path": "/targets/c", "value": 3}))
+
+    assert list(document["targets"].items()) == [("a", 1), ("b", 2), ("c", 3)]
+
+
+def test_apply_patch_reads_each_path_against_what_the_last_change_left() -> None:
+    document = {"steps": ["a", "b"]}
+
+    apply_patch(
+        document,
+        ops(
+            {"op": "add", "path": "/steps/0", "value": "new"},
+            {"op": "replace", "path": "/steps/1", "value": "c"},
+        ),
+    )
+
+    assert document == {"steps": ["new", "c", "b"]}
+
+
+def test_apply_patch_reads_a_pointer_as_rfc_6901() -> None:
+    document: dict[str, Any] = {"targets": {"a/b": 1, "~1": 2, "c~/d": 3}}
+
+    apply_patch(
+        document,
+        ops(
+            {"op": "replace", "path": "/targets/a~1b", "value": 4},
+            {"op": "replace", "path": "/targets/~01", "value": 5},
+            {"op": "replace", "path": "/targets/c~0~1d", "value": 6},
+        ),
+    )
+
+    assert document == {"targets": {"a/b": 4, "~1": 5, "c~/d": 6}}
+
+
+@pytest.mark.parametrize(
+    ("op", "path"),
+    [
+        ("replace", ""),
+        ("replace", "targets/a"),
+        ("replace", "/missing"),
+        ("replace", "/missing/deeper"),
+        ("add", "/missing/deeper"),
+        ("replace", "/targets/a/deeper"),
+        ("add", "/targets/a/deeper"),
+        ("replace", "/targets/~2"),
+        ("replace", "/targets/~"),
+        ("replace", "/steps/-1"),
+        ("add", "/steps/-1"),
+        ("add", "/steps/+1"),
+        ("add", "/steps/01"),
+        ("add", "/steps/1_0"),
+        ("add", "/steps/٣"),
+        ("add", "/steps/1 "),
+        ("add", "/steps/one"),
+        ("add", "/steps/3"),
+        ("replace", "/steps/2"),
+        ("replace", "/steps/-"),
+        ("add", "/steps/-/deeper"),
+        ("add", f"/steps/{'9' * 5000}"),
+    ],
+)
+def test_apply_patch_refuses_a_path_it_cant_follow(op: str, path: str) -> None:
+    document = {"targets": {"a": 1}, "steps": ["a", "b"]}
+
+    with pytest.raises(SpecError) as refused:
+        apply_patch(document, ops({"op": op, "path": path, "value": "new"}))
+
+    assert refused.value.problems == (f"{path}: a patch can't follow this path",)
+    assert document == {"targets": {"a": 1}, "steps": ["a", "b"]}
 
 
 CLAIM = TextInTarget(
