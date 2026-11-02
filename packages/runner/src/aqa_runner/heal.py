@@ -450,10 +450,10 @@ def _dropping(
 
 
 def _texts(value: object) -> Iterator[str]:
-    """Every string in `value`, a locator as JSON, its scope and held value
-    included."""
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, dict):
+    """Every value in `value`, a locator as JSON, as text, its scope's and held
+    value's included."""
+    if isinstance(value, dict):
         for each in value.values():
             yield from _texts(each)
+    else:
+        yield str(value)
