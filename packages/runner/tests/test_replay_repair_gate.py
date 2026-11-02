@@ -5,19 +5,20 @@ act on an element the committed locators can't vouch for. A refusal, or a look
 the page doesn't answer, fails the step with no intent. Real Chromium through
 `replays.replay_run`, with scripted repairs."""
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 from aqa_core.compiled import Click, CompiledScript, Target
-from aqa_runner import executor
+from aqa_runner import browser_session, executor
 from aqa_runner.bound_secrets import BoundSecret
 from aqa_runner.browser_session import BrowserSession
 from aqa_runner.evaluation import Evaluation, look_for
 from aqa_runner.locators import Resolved, Unresolved
 from aqa_runner.repairs import Drift
-from playwright.async_api import ElementHandle
+from playwright.async_api import ElementHandle, Page
 
 from packages.runner.tests import executor_fixtures as fx
 from packages.runner.tests.drift_fixtures import DETAILS
@@ -428,6 +429,30 @@ def test_a_fill_secret_whose_binding_check_the_page_never_answers_fails_with_no_
         await original(session, element, bound)
 
     monkeypatch.setattr(BrowserSession, "secret_refusal", going_busy)
+
+    run = repairing(
+        tmp_path,
+        bound_to("field", BY_THE_FORM),
+        script=one_step(FILL_SECRET, **LOGIN),
+        spec_at=secret_spec_at,
+        html=with_page_part('<form id="login"><input type="password"></form>'),
+    )
+
+    assert_not_dispatched(run, UNANSWERED)
+
+
+def test_a_fill_secret_whose_page_goes_busy_under_its_origin_read_fails_with_no_intent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = browser_session.isolated_origin
+
+    async def going_busy(page: Page) -> str | None:
+        await page.evaluate(GOES_BUSY)
+        # So the read that hangs is the origin's, under its CDP session.
+        await asyncio.sleep(0.2)
+        return await original(page)
+
+    monkeypatch.setattr(browser_session, "isolated_origin", going_busy)
 
     run = repairing(
         tmp_path,
