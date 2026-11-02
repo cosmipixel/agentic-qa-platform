@@ -43,7 +43,7 @@ from packages.runner.tests.explore_graph_fixtures import (
     Scripted,
     calling,
 )
-from packages.runner.tests.heal_fixtures import rebinding
+from packages.runner.tests.heal_fixtures import NO_TOOL, rebinding
 from packages.runner.tests.secret_fixtures import (
     BOUND_AT_START,
     OTHER_FAKE_VALUE,
@@ -475,6 +475,32 @@ def test_a_repaired_check_that_fails_exits_1_with_no_proposal(
         )
 
     assert result.exit_code == 1, result.output
+    assert replay_json(spec)["heal_proposal"] is None
+    assert "heal proposal" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("pick", "outcome", "code"),
+    [
+        pytest.param(NO_TOOL, "inconclusive", 3, id="no_pick"),
+        pytest.param(
+            rebinding("button", "Contact us"),
+            "expectation_violated",
+            1,
+            id="best_guess",
+        ),
+    ],
+)
+def test_the_removed_page_exits_as_its_heal_ended(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pick: Move, outcome: str, code: int
+) -> None:
+    spec = order_at(tmp_path / "qa")
+
+    with serving(page("removed")) as app:
+        result = run(monkeypatch, [str(spec), "--url", app.origin], Scripted(pick))
+
+    assert result.exit_code == code, result.output
+    assert result.stderr.startswith(f"{outcome} order: ")
     assert replay_json(spec)["heal_proposal"] is None
     assert "heal proposal" not in result.stderr
 
