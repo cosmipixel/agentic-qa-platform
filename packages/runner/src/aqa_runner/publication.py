@@ -33,6 +33,7 @@ from contextlib import suppress
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
+from stat import S_IMODE
 from typing import Final
 
 from aqa_core.compiled import CompiledScript
@@ -242,9 +243,9 @@ def _replace(
 def _install(at: Publication, data: bytes, deadline: float) -> None:
     """Write `data` whole to a new temporary file beside the target,
     forced, then install it: `link` when the run found no file, which fails
-    if one appeared, else `rename`. A failure before installing removes the
-    temporary and keeps that failure; one after says the script is
-    installed."""
+    if one appeared, else `rename`, with the file's mode, since `git diff`
+    would show another. A failure before installing removes the temporary
+    and keeps that failure; one after says the script is installed."""
     directory = at.target.parent
     try:
         suffix = os.urandom(8).hex()
@@ -258,6 +259,7 @@ def _install(at: Publication, data: bytes, deadline: float) -> None:
         if at.found is None:
             os.link(temporary, at.target)
         else:
+            temporary.chmod(S_IMODE(at.target.stat().st_mode))
             temporary.replace(at.target)
     except BaseException as error:
         _quietly(temporary.unlink)
