@@ -431,12 +431,18 @@ def test_a_project_that_doesnt_load_exits_5(
     assert files(tmp_path) == before
 
 
+@pytest.mark.parametrize(
+    "patch",
+    [REBIND, [{"op": "replace", "path": "/confirmed", "value": False}]],
+    ids=["a-patch-that-applies", "one-the-validator-refuses"],
+)
 def test_a_changed_script_is_stale_exits_3_and_changes_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patch: list[dict[str, Any]]
 ) -> None:
+    """Stale comes first: running again is what helps, whatever else the patch does."""
     root = tmp_path / "qa"
     target = committed(root)
-    proposal = recorded(root, REBIND)
+    proposal = recorded(root, patch)
     target.write_text(target.read_text() + "\n")
     before = files(tmp_path)
 
