@@ -20,7 +20,7 @@ from aqa_runner.evaluation import AssertionResult
 from aqa_runner.executor import RunResult
 from aqa_runner.locator_generation import register_identity_engine
 from aqa_runner.locators import Miss
-from aqa_runner.redaction import NO_SECRETS
+from aqa_runner.redaction import NO_SECRETS, Redacted
 from aqa_runner.repairs import Basis, Drift, ModelReported, Offer, StepAt
 from aqa_runner.replays import Opened, Replaying, replay_run
 from aqa_runner.run_record import RefusedWriteError, RunRecord
@@ -245,7 +245,7 @@ def test_a_repair_that_gives_up_says_why_and_any_run_stop_it_hit(
     }
 
 
-def test_a_refused_repairs_account_is_not_kept(tmp_path: Path) -> None:
+def test_a_refused_repairs_account_is_kept_and_recorded(tmp_path: Path) -> None:
     def offer(drift: Drift) -> Offer:
         said = drift.session.redactor.redact("a bound element")
         return Offer(rebound(drift.script, semantic="another meaning"), Basis(said))
@@ -253,8 +253,36 @@ def test_a_refused_repairs_account_is_not_kept(tmp_path: Path) -> None:
     run = repairing(tmp_path, offer)
 
     [repaired] = run.result.repairs
-    assert (bool(repaired.problems), repaired.basis) == (True, None)
-    assert "basis" not in cast(dict[str, object], document(run, 1))
+    assert repaired.problems == (
+        "/targets/toggle/semantic: a heal never changes a target's meaning",
+    )
+    assert repaired.basis == Basis(NO_SECRETS.redact("a bound element"))
+    assert cast(dict[str, Any], document(run, 1))["basis"] == {
+        "said": "a bound element",
+        "model_reported": None,
+        "stop": None,
+    }
+
+
+def test_an_account_that_spells_a_value_is_not_kept_with_its_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The record refused what the repair said, so its refusal keeps none of it."""
+    monkeypatch.setenv("AQA_SECRET_TEST_PASSWORD", FAKE_VALUE)
+
+    def offer(drift: Drift) -> Offer:
+        # Not through its scan: a repair that breaks the rule it is held to.
+        spelled = cast(Redacted, FAKE_VALUE)
+        return Offer(rebound(drift.script), Basis(spelled))
+
+    run = repairing(tmp_path, offer, spec_at=secret_spec_at)
+
+    [repaired] = run.result.repairs
+    assert repaired.problems == (
+        "repairs/1.json: a bound value's spelling is in it, so it isn't written",
+    )
+    assert repaired.basis is None
+    assert copies_found(FAKE_VALUE, files=[run.record / "repairs/1.json"]) == []
 
 
 def test_a_repair_reads_whether_the_run_was_interrupted(tmp_path: Path) -> None:

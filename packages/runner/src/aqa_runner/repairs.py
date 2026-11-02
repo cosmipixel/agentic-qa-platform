@@ -164,7 +164,7 @@ class Repaired:
     problem scanned, none when it was taken; and the script the run went on
     with, as replay parsed it, None when refused. A repair that offers the
     script it was handed gives up: neither problems nor a script. `basis` is
-    the repair's account of what replay took, or of why it gave up."""
+    the repair's account of what it offered."""
 
     at: At
     misses: tuple[Miss, ...]
@@ -284,17 +284,23 @@ class Handing:
         except SpecError as error:
             problems = error.problems
         except RefusedWriteError as error:
-            problems = [str(error)]
-        return self._refused(at, misses, problems)
+            # What it said may be what the record refused, so none of it stays.
+            return self._refused(at, misses, [str(error)])
+        return self._refused(at, misses, problems, offered.basis)
 
     def _refused(
-        self, at: At, misses: tuple[Miss, ...], problems: Sequence[str]
+        self,
+        at: At,
+        misses: tuple[Miss, ...],
+        problems: Sequence[str],
+        basis: Basis | None = None,
     ) -> Repaired:
-        """`at`'s repair refused, each of `problems` scanned, and recorded."""
+        """`at`'s repair refused, each of `problems` scanned, and recorded, with
+        the repair's account of what it offered, if it gave one."""
         name = f"repairs/{at.key}.json"
         redactor = self.record.redactor
         scanned = tuple(redactor.redact(problem) for problem in problems)
-        refused = Repaired(at, misses, scanned, None)
+        refused = Repaired(at, misses, scanned, None, basis)
         self.record.write(
             name, _repair_record(refused), check=require_clean(redactor, name)
         )

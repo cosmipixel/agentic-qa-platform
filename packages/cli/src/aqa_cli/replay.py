@@ -27,7 +27,8 @@ from typing import Annotated, Final
 import typer
 from aqa_core.compiled import CompiledScript
 from aqa_core.config import ProjectConfig
-from aqa_core.project import SpecError, load_compiled
+from aqa_core.heal_patch import blob_sha
+from aqa_core.project import SpecError, read_compiled
 from aqa_core.spec import Spec
 from aqa_runner.admission import BoundValueSpelledError, admitted
 from aqa_runner.bound_secrets import BoundSecret, MissingSecretError, SecretLoggedError
@@ -121,7 +122,7 @@ def _admitted(paths: Sequence[Path], url: str | None) -> list[StrictRun]:
         except SpecError as error:
             stop("spec_error", str(path), _NOTHING, error.problems, scan=scan)
         spec_id = spec.frontmatter.id
-        script = _compiled(root, spec, config, scan)
+        script, raw = _compiled(root, spec, config, scan)
         try:
             _, _, bound, _ = admitted(script, spec, config, start)
         except BoundValueSpelledError as error:
@@ -135,16 +136,17 @@ def _admitted(paths: Sequence[Path], url: str | None) -> list[StrictRun]:
         except SecretLoggedError as error:
             scan = _scan(runs, error.bound.values())
             stop("secret_unusable", spec_id, _NOTHING, (str(error),), scan=scan)
-        runs.append(StrictRun(root, spec, config, start, script, bound))
+        runs.append(StrictRun(root, spec, config, start, script, bound, blob_sha(raw)))
     return runs
 
 
 def _compiled(
     root: Path, spec: Spec, config: ProjectConfig, scan: Redactor
-) -> CompiledScript:
-    """`spec`'s compiled script, read as explore reads it, or a stop
-    scanned with `scan`: none, a link on the way (`publication`) and one
-    that doesn't load are spec errors, and one that can't be read is 15."""
+) -> tuple[CompiledScript, bytes]:
+    """`spec`'s compiled script, read as explore reads it, and the bytes it was
+    read from, or a stop scanned with `scan`: none, a link on the way
+    (`publication`) and one that doesn't load are spec errors, and one that
+    can't be read is 15."""
     spec_id = spec.frontmatter.id
     try:
         at = publication(root, spec)
@@ -155,7 +157,7 @@ def _compiled(
     if at.found is None:
         stop("spec_error", spec_id, _MISSING, scan=scan)
     try:
-        return load_compiled(at.target, config)
+        return read_compiled(at.target, config)
     except OSError:
         stop("record_error", spec_id, _UNREAD, scan=scan)
     except SpecError as error:

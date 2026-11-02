@@ -1,8 +1,10 @@
-"""One strict replay of a spec's compiled script (#239; ADR-0024's #238
-amendment): a run record and an egress gate, then the spec's reset hook and
-the script replayed with every locator and no model, through
-`replays.replay_run`, in a fresh browser on the caller's driver; then the
-run's `replay.json` (`replay_result.present`), whose outcome decides.
+"""One replay of a spec's compiled script with every locator (#239, #244;
+ADR-0024's #238 and #244 amendments): a run record and an egress gate, then the
+spec's reset hook and the script replayed through `replays.replay_run`, in a
+fresh browser on the caller's driver; then the run's `replay.json`
+(`replay_result.present`), whose outcome decides. With no `heal`, a strict
+replay, nothing here builds a model client. With one, what `aqa run` gives, a
+drift goes to the repair it builds for the run.
 
 The caller admits the script and binds its test secrets first, for every
 spec before any run (`aqa replay`), so nothing here sends a reset for a
@@ -11,9 +13,10 @@ failed (14), a browser that isn't sandboxed or a selector engine left
 unregistered (10), an egress listener that couldn't open (13), and a record
 that couldn't be made or took no more lines (15)."""
 
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
+from decimal import Decimal
 from functools import partial
 from pathlib import Path
 from typing import Final
@@ -28,7 +31,10 @@ from aqa_runner.bound_secrets import BoundSecret
 from aqa_runner.egress import EgressGate, egress_policy
 from aqa_runner.egress_proxy import EgressProxy, ListenerUnavailableError
 from aqa_runner.executor import RunResult
+from aqa_runner.heal_proposal import proposal_lines
+from aqa_runner.model_turns import Spending
 from aqa_runner.redaction import Redactor
+from aqa_runner.repairs import Repair
 from aqa_runner.replay_result import (
     Outcome,
     ReplayEnd,
@@ -50,9 +56,10 @@ _UNSAVED: Final = "replay.json could not be written to the run record"
 
 @dataclass(frozen=True)
 class StrictRun:
-    """One spec's strict replay, admitted (`admission.admitted`): its spec
-    root, spec, project config and start origin, the compiled script, and
-    the test secrets the run binds."""
+    """One spec's replay, admitted (`admission.admitted`): its spec root, spec,
+    project config and start origin, the compiled script, the test secrets the
+    run binds, and the blob SHA of the bytes the script was read from
+    (`heal_patch.blob_sha`)."""
 
     root: Path
     spec: Spec
@@ -60,32 +67,44 @@ class StrictRun:
     start: str
     script: CompiledScript
     bound: Mapping[str, BoundSecret]
+    blob_sha: str
 
 
 @dataclass(frozen=True)
 class Replayed:
-    """How one strict run ended: its outcome; its document, `replay.json`
-    as written or as the record couldn't take it; and its record, None when
-    none could be made."""
+    """How one run ended: its outcome; its document, `replay.json` as written
+    or as the record couldn't take it; its record, None when none could be
+    made; what its model calls cost; and what a person reads of its heal
+    proposal, if it made one."""
 
     outcome: Outcome
     document: Mapping[str, object]
     record: Path | None
+    cost: Decimal = Decimal(0)
+    proposal: tuple[str, ...] = ()
 
 
 async def strict_replay(
-    run: StrictRun, playwright: Playwright, scan: Redactor
+    run: StrictRun,
+    playwright: Playwright,
+    scan: Redactor,
+    *,
+    heal: Callable[[Spending], Repair] | None = None,
 ) -> Replayed:
     """Replay `run` once in a new record under its spec root, launching its
     browser from `playwright`, whose selector engines are registered, and
     write its `replay.json` (module docstring). The record scans with
     `scan`, every test secret the caller bound, `run`'s among them, so no
-    run's record keeps a value another spec binds."""
+    run's record keeps a value another spec binds. With `heal`, drift goes to
+    the repair it builds, once, for the run's spend (`heal_model_usd`)."""
     spec = run.spec
     try:
         record = RunRecord.create(run.root).redacting(scan)
     except OSError, ValueError:  # ValueError: a .aqa or .aqa/runs that is a link
-        return Replayed("record_error", unrecorded(spec, scan, _UNMADE), None)
+        document = unrecorded(spec, scan, _UNMADE, healing=heal is not None)
+        return Replayed("record_error", document, None)
+    spending = Spending(record, Decimal(str(run.config.budgets.heal_model_usd)))
+    repair = None if heal is None else heal(spending)
     gate = EgressGate(egress_policy(spec, run.config, run.start))
     proxy = EgressProxy(gate)
     replaying = Replaying(spec, run.config, run.start, gate)
@@ -93,7 +112,9 @@ async def strict_replay(
     result: RunResult | None = None
     stops: list[Stop] = []
     try:
-        result = await replay_run(run.script, replaying, opening, every_locator=True)
+        result = await replay_run(
+            run.script, replaying, opening, every_locator=True, repair=repair
+        )
     except ResetFailedError as error:
         stops.append(Stop("reset_unsafe", record.redactor.redact(str(error))))
     except (SandboxUnavailableError, UnregisteredEngineError) as error:
@@ -107,8 +128,13 @@ async def strict_replay(
     # more lines, egress.json's included, loses the result, never a block.
     blocks = proxy.egress_blocks(run.config.egress.expected_blocked)
     events = tuple(gate.infrastructure_events)
-    end = ReplayEnd(record, spec, run.script, result, blocks, events, tuple(stops))
-    return _ended(end)
+    base = None if heal is None else run.blob_sha
+    end = ReplayEnd(
+        record, spec, run.script, result, blocks, events, tuple(stops), base
+    )
+    return replace(
+        _ended(end), cost=sum((c.cost_usd for c in spending.calls), Decimal(0))
+    )
 
 
 @asynccontextmanager
@@ -137,4 +163,14 @@ def _ended(end: ReplayEnd) -> Replayed:
         unsaved = Stop("record_error", end.record.redactor.redact(_UNSAVED))
         end = replace(end, stops=(*end.stops, unsaved))
         document = present(end)
-    return Replayed(final_outcome(end), document, end.record.path)
+    outcome = final_outcome(end)
+    return Replayed(outcome, document, end.record.path, proposal=_said(end, document))
+
+
+def _said(end: ReplayEnd, document: Mapping[str, object]) -> tuple[str, ...]:
+    """What a person reads of the proposal `document` holds, if it holds one."""
+    proposal = document.get("heal_proposal")
+    if not isinstance(proposal, dict) or end.result is None:
+        return ()
+    spec_id = end.spec.frontmatter.id
+    return proposal_lines(spec_id, proposal["id"], end.script, end.result.repairs)

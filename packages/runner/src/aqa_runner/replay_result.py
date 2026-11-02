@@ -1,5 +1,5 @@
-"""A strict replay's outcome and its run document, `replay.json`
-(ADR-0024's #238 amendment, DATA_MODEL §7).
+"""A replay's outcome and its run document, `replay.json` (ADR-0024's #238 and
+#244 amendments, DATA_MODEL §7), for a strict replay and for a run that heals.
 
 `present` projects a run into `replay.json`: a verdict for each step that
 ran, each assertion evaluated or whose look raised, and each invariant the
@@ -16,29 +16,42 @@ is scanned again with that scan, and so is every reason assembled here.
 `final_outcome` picks the outcome when several causes hold, and
 `rolled_up` picks the run that decides when several specs ran, by the same
 order. Spec and secret errors (5, 12) are found before any run, so they
-never reach here; no strict replay calls a model or heals, so neither 11
-nor 7 is here either.
+never reach here. No strict replay calls a model or heals, so only a run that
+heals can end 11 or 7, and only its document has `heal_proposal` and each
+verdict's `heal`.
 
 Neither touches a browser, file or clock: a record is read for its ID, scan
 and the intents it holds unresolved in memory."""
 
 from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final, Literal
 
-from aqa_core.compiled import Assertion, CompiledScript, VisibleUnoccluded
+from aqa_core.compiled import (
+    Assertion,
+    Click,
+    CompiledScript,
+    Fill,
+    FillSecret,
+    NotVisible,
+    Select,
+    TextInTarget,
+    VisibleUnoccluded,
+)
 from aqa_core.spec import InvariantName, Spec
 
 from aqa_runner.egress import InfrastructureEvent
 from aqa_runner.egress_proxy import EgressBlocks
 from aqa_runner.evaluation import AssertionResult
 from aqa_runner.executor import RunResult, StepResult
+from aqa_runner.heal_proposal import final_script, proposal_document
 from aqa_runner.invariants import InvariantResult
 from aqa_runner.locators import Miss
 from aqa_runner.redaction import Redacted, Redactor
+from aqa_runner.repairs import Repaired, StepAt
 from aqa_runner.run_record import RunRecord
 
-# How a strict replay ends, with its exit code (API.md §7). The order is the
+# How a replay ends, with its exit code (API.md §7). The order is the
 # precedence, `final_outcome` and `rolled_up` taking the first that holds
 # (ADR-0024's #238 amendment).
 type Outcome = Literal[
@@ -48,8 +61,10 @@ type Outcome = Literal[
     "reset_unsafe",
     "unreachable",
     "record_error",
+    "no_response",
     "expectation_violated",
     "inconclusive",
+    "drift_consistent",
     "passed",
 ]
 EXIT_CODES: Final[Mapping[Outcome, int]] = {
@@ -59,18 +74,24 @@ EXIT_CODES: Final[Mapping[Outcome, int]] = {
     "reset_unsafe": 14,
     "unreachable": 13,
     "record_error": 15,
+    "no_response": 11,
     "expectation_violated": 1,
     "inconclusive": 3,
+    "drift_consistent": 7,
     "passed": 0,
 }
 
 # The causes a run stops on that its result can't show: replay raised, or
 # its document couldn't be written.
-type Stoppage = Literal["no_sandbox", "reset_unsafe", "unreachable", "record_error"]
+type Stoppage = Literal[
+    "no_sandbox", "reset_unsafe", "unreachable", "record_error", "no_response"
+]
 
-# A step's, assertion's or invariant's verdict in strict replay, which never
-# heals, so never `drift_consistent` (CONTEXT.md, "Verdict").
-type Verdict = Literal["pass", "expectation_violated", "inconclusive"]
+# A step's, assertion's or invariant's verdict. Strict replay never heals, so
+# never gives `drift_consistent` (CONTEXT.md, "Verdict").
+type Verdict = Literal[
+    "pass", "expectation_violated", "inconclusive", "drift_consistent"
+]
 
 # The `findings.category` of each violation's finding (DATA_MODEL §2).
 type Category = Literal["functional", "visual", "backend_5xx", "js_error"]
@@ -83,6 +104,8 @@ _CATEGORIES: Final[Mapping[InvariantName, Category]] = {
 # The reason an infrastructure event gives (exit 13, API.md §7), in fixed
 # words: an event's host and cause are withheld in a run that binds a secret.
 _UNREACHED: Final = "an allowed host or the egress proxy couldn't be reached"
+# Why a completed step on a rebound target gets no verdict of its own (Q12).
+_NOT_PASSED: Final = "heal rebound its target, but the run didn't pass"
 
 
 @dataclass(frozen=True)
@@ -96,13 +119,14 @@ class Stop:
 
 @dataclass(frozen=True)
 class ReplayEnd:
-    """What a strict run knows once replay returned or raised: its record,
-    whose scan decides what is withheld and which holds the intents the run
-    left unresolved; the spec and the compiled script it replayed; replay's
-    result, None when replay raised; the egress blocks and the gate's
-    infrastructure events as the run left them, which hold whether or not
-    replay returned or its record took them, as explore's do; and each
-    cause it stopped on."""
+    """What a run knows once replay returned or raised: its record, whose scan
+    decides what is withheld and which holds the intents the run left
+    unresolved; the spec and the compiled script it replayed; replay's result,
+    None when replay raised; the egress blocks and the gate's infrastructure
+    events as the run left them, which hold whether or not replay returned or
+    its record took them, as explore's do; each cause it stopped on; and, in a
+    run that heals, the blob SHA of the compiled file it replayed
+    (`heal_patch.blob_sha`), None in a strict replay, which never heals."""
 
     record: RunRecord
     spec: Spec
@@ -111,13 +135,28 @@ class ReplayEnd:
     blocks: EgressBlocks
     infrastructure_events: tuple[InfrastructureEvent, ...]
     stops: tuple[Stop, ...] = ()
+    base: str | None = None
+
+    @property
+    def stopped_on(self) -> tuple[Stop, ...]:
+        """Each cause the run stopped on, and each stop of the whole run a
+        repair hit, which ended its handoffs."""
+        repairs = () if self.result is None else self.result.repairs
+        return (
+            *self.stops,
+            *(
+                Stop(basis.stop, basis.said)
+                for repaired in repairs
+                if (basis := repaired.basis) is not None and basis.stop is not None
+            ),
+        )
 
 
 def final_outcome(end: ReplayEnd) -> Outcome:
     """The outcome `end` exits with: of every cause that holds, the first in
     `EXIT_CODES`. An unresolved intent with `side_effect: true` makes the run
     non-resumable whatever else holds. A run with no result never passes."""
-    holding: set[Outcome] = {stop.outcome for stop in end.stops}
+    holding: set[Outcome] = {stop.outcome for stop in end.stopped_on}
     if _non_resumable(end):
         holding.add("non_resumable")
     if end.blocks.blocked:
@@ -131,6 +170,8 @@ def final_outcome(end: ReplayEnd) -> Outcome:
         holding.add("expectation_violated")
     if "inconclusive" in verdicts:
         holding.add("inconclusive")
+    if "drift_consistent" in verdicts:
+        holding.add("drift_consistent")
     holding.add("passed")
     return next(outcome for outcome in EXIT_CODES if outcome in holding)
 
@@ -144,7 +185,9 @@ def rolled_up(outcomes: Iterable[Outcome]) -> Outcome:
 
 def present(end: ReplayEnd) -> dict[str, object]:
     """`end` as `replay.json` holds it, JSON-ready: schema 1. Every
-    non-resumable step is listed whatever the outcome."""
+    non-resumable step is listed whatever the outcome. A run that heals says so
+    in its `mode`, and adds `heal_proposal`, null unless it ended
+    `drift_consistent`."""
     outcome = final_outcome(end)
     withheld = not end.record.redactor.empty
     events = end.infrastructure_events
@@ -153,7 +196,7 @@ def present(end: ReplayEnd) -> dict[str, object]:
         "schema_version": 1,
         "run_id": end.record.run_id,
         "spec_id": end.spec.frontmatter.id,
-        "mode": "strict",
+        "mode": "strict" if end.base is None else "run",
         "outcome": outcome,
         "exit_code": EXIT_CODES[outcome],
         "withheld": withheld,
@@ -170,19 +213,30 @@ def present(end: ReplayEnd) -> dict[str, object]:
             ],
         },
         "verdicts": [verdict.entry for verdict in judged],
+        **({} if end.base is None else {"heal_proposal": _proposal(end, outcome)}),
     }
 
 
-def unrecorded(spec: Spec, redactor: Redactor, reason: str) -> dict[str, object]:
+def _proposal(end: ReplayEnd, outcome: Outcome) -> dict[str, object] | None:
+    if end.base is None or end.result is None or outcome != "drift_consistent":
+        return None
+    final = final_script(end.script, end.result.repairs)
+    return proposal_document(end.spec.frontmatter.id, end.base, end.script, final)
+
+
+def unrecorded(
+    spec: Spec, redactor: Redactor, reason: str, *, healing: bool = False
+) -> dict[str, object]:
     """The document of a run of `spec` whose record couldn't be made, which
     no file holds: `present`'s fields, with no run ID, nothing that ran, and
-    `reason`, scanned with `redactor`, the run's, its one reason."""
+    `reason`, scanned with `redactor`, the run's, its one reason. `healing` says
+    it was a run that heals."""
     withheld = not redactor.empty
     return {
         "schema_version": 1,
         "run_id": None,
         "spec_id": spec.frontmatter.id,
-        "mode": "strict",
+        "mode": "run" if healing else "strict",
         "outcome": "record_error",
         "exit_code": EXIT_CODES["record_error"],
         "withheld": withheld,
@@ -191,6 +245,7 @@ def unrecorded(spec: Spec, redactor: Redactor, reason: str) -> dict[str, object]
         "non_resumable": [],
         "infrastructure_events": {"count": 0, "events": None if withheld else []},
         "verdicts": [],
+        **({"heal_proposal": None} if healing else {}),
     }
 
 
@@ -201,11 +256,24 @@ def _non_resumable(end: ReplayEnd) -> list[int]:
 @dataclass(frozen=True)
 class _Judged:
     """One verdict: what the run's reasons call its subject (`step 1`,
-    `a2`, `invariant js_exceptions`), the verdict, and its document entry."""
+    `a2`, `invariant js_exceptions`), the verdict, its document entry, and
+    each locator's miss when its target drifted, else None."""
 
     label: str
     verdict: Verdict
     entry: dict[str, object]
+    drift: tuple[Miss, ...] | None = None
+
+    def cited(self, heal: dict[str, object] | None) -> _Judged:
+        """This verdict, as it is, citing `heal`."""
+        return replace(self, entry=self.entry | {"heal": heal})
+
+    def ruled(
+        self, verdict: Verdict, reason: str | None, heal: dict[str, object] | None
+    ) -> _Judged:
+        """This subject with the verdict a run that heals rules on it."""
+        ruling = {"verdict": verdict, "reason": reason, "heal": heal}
+        return replace(self, verdict=verdict, entry=self.entry | ruling)
 
 
 def _judged(end: ReplayEnd) -> list[_Judged]:
@@ -241,7 +309,7 @@ def _judged(end: ReplayEnd) -> list[_Judged]:
         if invariant.outcome == "violated"
         or (invariant.outcome == "held" and not stopped)
     )
-    return judged
+    return judged if end.base is None else _Healed.of(end, result).judged(judged)
 
 
 @dataclass(frozen=True)
@@ -259,7 +327,10 @@ class _Judging:
 
     def step(self, step: StepResult) -> _Judged:
         located = {"step": step.seq, **_located(step.locator_index, step.misses)}
-        return self._judged(f"step {step.seq}", located, _step_verdict(step), step.seq)
+        judged = self._judged(
+            f"step {step.seq}", located, _step_verdict(step), step.seq
+        )
+        return replace(judged, drift=step.misses if step.outcome == "drifted" else None)
 
     def assertion(
         self, result: AssertionResult, check: Assertion, expectation: str
@@ -271,13 +342,15 @@ class _Judging:
         category: Category = (
             "visual" if isinstance(check, VisibleUnoccluded) else "functional"
         )
-        return self._judged(
+        judged = self._judged(
             result.id,
             located,
             _assertion_verdict(result),
             self.last,
             about=(category, expectation),
         )
+        drifted = result.outcome == "binding_unresolved"
+        return replace(judged, drift=result.misses if drifted else None)
 
     def invariant(self, result: InvariantResult) -> _Judged:
         name = result.name
@@ -352,9 +425,137 @@ def _assertion_verdict(result: AssertionResult) -> tuple[Verdict, str | None]:
     return "inconclusive", result.error
 
 
-def _drift(misses: tuple[Miss, ...]) -> str:
+def _drift(misses: tuple[Miss, ...], why: str = "strict replay doesn't heal") -> str:
     said = f" ({', '.join(misses)})" if misses else ""
-    return f"drift: strict replay doesn't heal{said}"
+    return f"drift: {why}{said}"
+
+
+@dataclass(frozen=True)
+class _Healed:
+    """What a run that heals changes in its verdicts (ADR-0024's #244
+    amendment). A subject is on the rebound set when it is a step that ran
+    through a target whose locators differ between the committed script and the
+    final one, or an assertion of any kind on such a target. `by_subject` is each
+    repair by the label of what it was handed, `first` each target's first repair
+    to change it, `targets` what each subject's label reads, and `untroubled`
+    says nothing stopped, blocked or left unresolved the run."""
+
+    redactor: Redactor
+    rebound: frozenset[str]
+    by_subject: Mapping[str, Repaired]
+    first: Mapping[str, Repaired]
+    targets: Mapping[str, str]
+    untroubled: bool
+
+    @classmethod
+    def of(cls, end: ReplayEnd, result: RunResult) -> _Healed:
+        final = final_script(end.script, result.repairs)
+        targets = {
+            f"step {step.seq}": step.target
+            for step in final.steps
+            if isinstance(step, Click | Fill | FillSecret | Select)
+        } | {
+            check.id: check.target
+            for check in end.script.assertions
+            if isinstance(check, TextInTarget | NotVisible | VisibleUnoccluded)
+        }
+        return cls(
+            end.record.redactor,
+            frozenset(
+                name
+                for name, target in end.script.targets.items()
+                if final.targets[name].locators != target.locators
+            ),
+            {_subject(repaired): repaired for repaired in result.repairs},
+            _first_to_change(end.script, result.repairs),
+            targets,
+            not (
+                end.stopped_on
+                or end.blocks.blocked
+                or end.infrastructure_events
+                or _non_resumable(end)
+            ),
+        )
+
+    def judged(self, judged: list[_Judged]) -> list[_Judged]:
+        """`judged`, each ruled on. Only when every one of the run's own verdicts
+        passes and nothing troubled it is a subject on the rebound set
+        `drift_consistent`; with none on it, the run just passed."""
+        passed = self.untroubled and all(each.verdict == "pass" for each in judged)
+        return [self._marked(each, passed=passed) for each in judged]
+
+    def _marked(self, judged: _Judged, *, passed: bool) -> _Judged:
+        """`judged`, with its `heal`: a drift says what became of its repair; a
+        subject on the rebound set cites the repair that first changed its
+        target. There a completed step in a run that didn't pass is `inconclusive`
+        (Q12), and an assertion keeps its own verdict (#245)."""
+        target = self.targets.get(judged.label)
+        if judged.drift is not None:
+            first = None if target is None else self.first.get(target)
+            repair = self.by_subject.get(judged.label) or first
+            said = _drift(judged.drift, _why_drifted(repair))
+            cited = None if repair is None else _cited(repair, bound=False)
+            return judged.ruled("inconclusive", self.redactor.redact(said), cited)
+        if target is None or target not in self.rebound:
+            return judged.cited(None)
+        cited = _cited(self.first[target], bound=True)
+        if passed:
+            return judged.ruled("drift_consistent", None, cited)
+        if judged.label.startswith("step ") and judged.verdict == "pass":
+            return judged.ruled(
+                "inconclusive", self.redactor.redact(_NOT_PASSED), cited
+            )
+        return judged.cited(cited)
+
+
+def _subject(repaired: Repaired) -> str:
+    """The label of what `repaired` was handed."""
+    at = repaired.at
+    return f"step {at.step.seq}" if isinstance(at, StepAt) else at.check.id
+
+
+def _first_to_change(
+    committed: CompiledScript, repairs: tuple[Repaired, ...]
+) -> dict[str, Repaired]:
+    """Each target's first taken repair to change its locators."""
+    first: dict[str, Repaired] = {}
+    previous = committed
+    for repaired in repairs:
+        if (script := repaired.script) is None:
+            continue
+        for name, target in script.targets.items():
+            if target.locators != previous.targets[name].locators:
+                first.setdefault(name, repaired)
+        previous = script
+    return first
+
+
+def _why_drifted(repair: Repaired | None) -> str:
+    if repair is None:
+        return "it went to no heal"
+    if repair.problems:
+        return f"replay refused the heal's repair: {'; '.join(repair.problems)}"
+    if repair.script is not None:
+        return "drifted again after its repair"
+    said = "" if repair.basis is None else f": {repair.basis.said}"
+    return f"heal gave up{said}"
+
+
+def _cited(repaired: Repaired, *, bound: bool) -> dict[str, object]:
+    """Where a verdict's heal is: its repair's record, the heal's own files if
+    it wrote any, and, for a binding the verdict stands on, what it bound and
+    what its model said of that, which is the model's own report and decides
+    nothing (CONTEXT.md, "Verdict")."""
+    basis = repaired.basis
+    reported = None if basis is None or not bound else basis.model_reported
+    return {
+        "repair": f"repairs/{repaired.at.key}.json",
+        "record": None if basis is None else basis.record,
+        "bound": None if basis is None or not bound else basis.said,
+        "model_reported": None
+        if reported is None
+        else {"confidence": reported.confidence, "rationale": reported.rationale},
+    }
 
 
 def _reasons(end: ReplayEnd, judged: list[_Judged]) -> Iterator[Redacted]:
@@ -362,11 +563,12 @@ def _reasons(end: ReplayEnd, judged: list[_Judged]) -> Iterator[Redacted]:
     an infrastructure event, then each verdict but a pass, with its reason,
     each scanned whole, so a value spanning a join is found."""
     scan = end.record.redactor.redact
-    yield from (scan(stop.reason) for stop in end.stops)
+    yield from (scan(stop.reason) for stop in end.stopped_on)
     if end.infrastructure_events:
         yield scan(_UNREACHED)
     for verdict in judged:
-        if verdict.verdict != "pass":
+        # A proposal has its own block, so it isn't why the run didn't pass.
+        if verdict.verdict not in ("pass", "drift_consistent"):
             reason = verdict.entry["reason"]
             said = "" if reason is None else f", {reason}"
             yield scan(f"{verdict.label}: {verdict.verdict}{said}")

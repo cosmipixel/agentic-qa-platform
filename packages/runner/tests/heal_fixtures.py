@@ -4,6 +4,7 @@ what the model's moves look like. Imported by its path, as pytest names the
 runner's test modules (TESTING.md §1, Shared egress fixtures)."""
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from aqa_runner.model_router import ModelRouter
 from aqa_runner.model_turns import Spending
 from aqa_runner.redaction import Redactor
 from aqa_runner.repairs import Basis, Drift, Offer
+from aqa_runner.replay_result import ReplayEnd, present
 from aqa_runner.replays import Opened, Replaying, replay_run
 from aqa_runner.run_record import RunRecord
 from langchain_core.messages import AIMessage, BaseMessage
@@ -47,6 +49,8 @@ from packages.runner.tests.explore_graph_fixtures import (
 MOVED = page("moved")
 # Long enough that a heal's reads don't run out under a loaded machine.
 BUDGETS = "budgets: { resolve_seconds: 2 }\n"
+# The blob SHA a harness's proposals cite: `git hash-object` of `hello\\n`.
+BLOB = "ce013625030ba8dba906f756967f9e9ca394464a"
 
 
 def rebinding(
@@ -90,6 +94,19 @@ class Healed:
     committed: CompiledScript
     spending: Spending
     drifts: list[Drift]
+    end: ReplayEnd
+
+    @property
+    def document(self) -> dict[str, Any]:
+        """The run's `replay.json`, as a reader of its JSON gets it."""
+        loaded: dict[str, Any] = json.loads(json.dumps(present(self.end)))
+        return loaded
+
+    def verdict(self, kind: str, name: object) -> dict[str, Any]:
+        """The verdict the document gives the step or assertion `kind` called
+        `name`."""
+        verdicts: list[dict[str, Any]] = self.document["verdicts"]
+        return next(each for each in verdicts if each.get(kind) == name)
 
     def requests(self) -> list[str]:
         """The text of each request's last message, as sent."""
@@ -140,9 +157,11 @@ def healed(
                 await before_the_heal(drift)
             return await healing.repair(drift)
 
+        proxy = EgressProxy(run_gate)
+
         @asynccontextmanager
         async def opening() -> AsyncIterator[Opened]:
-            async with async_playwright() as playwright, EgressProxy(run_gate) as proxy:
+            async with async_playwright() as playwright, proxy:
                 await register_identity_engine(playwright)
                 yield Opened(playwright.chromium, proxy, record)
 
@@ -155,7 +174,18 @@ def healed(
                 )
 
         result = asyncio.run(scenario())
-    return Healed(result, record.path, client, app.seen, committed, spending, drifts)
+    end = ReplayEnd(
+        record,
+        spec,
+        committed,
+        result,
+        proxy.egress_blocks(loaded.egress.expected_blocked),
+        tuple(run_gate.infrastructure_events),
+        base=BLOB,
+    )
+    return Healed(
+        result, record.path, client, app.seen, committed, spending, drifts, end
+    )
 
 
 def outcomes(run: Healed) -> list[tuple[int, str]]:
