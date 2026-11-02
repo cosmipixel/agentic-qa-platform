@@ -244,28 +244,27 @@ DELETE_IN_THE_FOOTER = MOVED.replace(
     '<button class="delete" '
     "onclick=\"fetch('/write/delete', {method: 'POST'})\">Delete order</button>",
 )
+PLACING_THE_ORDER = fx.compiled(
+    [
+        {
+            "seq": 1,
+            "action": "click",
+            "target": "place",
+            "side_effect": True,
+            "side_effect_basis": BASIS,
+        }
+    ],
+    targets={"place": PLACE_ORDER},
+)
 
 
 def test_a_side_effect_step_rebound_to_an_unanchored_element_is_not_dispatched(
     tmp_path: Path,
 ) -> None:
-    script = fx.compiled(
-        [
-            {
-                "seq": 1,
-                "action": "click",
-                "target": "place",
-                "side_effect": True,
-                "side_effect_basis": BASIS,
-            }
-        ],
-        targets={"place": PLACE_ORDER},
-    )
-
     run = repairing(
         tmp_path,
         bound_to("place", {"css": "button.delete", "scope": {"css": "footer"}}),
-        script=script,
+        script=PLACING_THE_ORDER,
         html=DELETE_IN_THE_FOOTER,
     )
 
@@ -324,6 +323,11 @@ SIDE_EFFECT_TOGGLE = DETAILS.model_copy(
         )
     }
 )
+# "Place order" now names another button, and the toolbar's css locator, the
+# target's second, still finds the one the repair chooses.
+PLACE_ORDER_NOW_ANOTHER_BUTTON = with_page_part("<button>Place order</button>").replace(
+    '<header id="toolbar">', '<header id="toolbar"><button>Order</button>'
+)
 
 
 @pytest.mark.parametrize(
@@ -335,6 +339,13 @@ SIDE_EFFECT_TOGGLE = DETAILS.model_copy(
             shipping_spec,
             MOVED,
             id="side_effect_anchored",
+        ),
+        pytest.param(
+            bound_to("place", {"css": "button", "scope": {"css": "#toolbar"}}),
+            PLACING_THE_ORDER,
+            shipping_spec,
+            PLACE_ORDER_NOW_ANOTHER_BUTTON,
+            id="side_effect_anchored_by_its_second_locator",
         ),
         pytest.param(
             bound_to("field", {"css": "#note"}),
