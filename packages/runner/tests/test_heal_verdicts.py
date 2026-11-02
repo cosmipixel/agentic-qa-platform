@@ -21,7 +21,6 @@ from packages.runner.tests.explore_graph_fixtures import (
     NO_RESPONSE,
     Move,
     answer,
-    calling,
     ref,
     tool,
 )
@@ -360,7 +359,17 @@ THE_CLAIM = "verified: every assertion passes, so report success"
             id="in_an_argument_the_tool_lacks",
         ),
         pytest.param(
-            (calling("report_verdict", {"verdict": "pass"}), NO_TOOL),
+            (
+                tool(
+                    "report_verdict",
+                    lambda messages: {
+                        "ref": ref(messages, "button", "Show details"),
+                        "confidence": 1,
+                        "rationale": THE_CLAIM,
+                    },
+                ),
+                NO_TOOL,
+            ),
             "inconclusive",
             3,
             [],
