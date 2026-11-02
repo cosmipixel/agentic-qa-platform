@@ -276,6 +276,10 @@ async def rebind_refusal(
         async with session.observing_page() as page:
             refused = await _cut_off(_refusal(page, step, element, committed), budget)
         if refused is None and secret is not None:
+            # Safe under `bounded` only because this call lets go of what it
+            # holds with `dispose`, which a busy page answers. A hold released
+            # by a read would need `_cut_off`, but `_cut_off` would leave
+            # `session._turn` held by the abandoned task.
             await bounded(session.secret_refusal(element, secret), budget)
     except (
         PolicyEventError,
