@@ -406,7 +406,7 @@ def test_a_compiled_script_that_cant_be_read_exits_15_before_the_driver(
         def unreadable(*_: object) -> NoReturn:
             raise PermissionError(errno.EACCES, "fake unreadable script")
 
-        monkeypatch.setattr(replay_module, "load_compiled", unreadable)
+        monkeypatch.setattr(replay_module, "read_compiled", unreadable)
     else:
         (spec.parent / ".compiled" / "shop.json").chmod(0)
 
