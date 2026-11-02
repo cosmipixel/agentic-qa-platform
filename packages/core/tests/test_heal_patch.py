@@ -711,6 +711,21 @@ def test_proposal_id_is_ah_and_12_hex_of_its_content() -> None:
     assert proposal_id("order", "abc123", []) != "ah_d2ef532da612"
 
 
+def test_proposal_id_reads_a_values_keys_in_sorted_order() -> None:
+    patch: list[dict[str, Any]] = [
+        {
+            "op": "replace",
+            "path": "/targets/toggle/locators",
+            "value": [{"role": "button", "name": "Save"}],
+        }
+    ]
+
+    # `shasum -a 256` of {"base":"abc123","patch":[{"op":"replace","path":
+    # "/targets/toggle/locators","value":[{"name":"Save","role":"button"}]}],
+    # "spec_id":"order"}.
+    assert proposal_id("order", "abc123", patch) == "ah_b314df31871b"
+
+
 CLAIM = TextInTarget(
     id="a1", expect_index=0, check="text_in_target", target="t", text="ships on Monday"
 )
