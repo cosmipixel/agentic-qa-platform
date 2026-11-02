@@ -336,6 +336,24 @@ class PatchOp(StrictModel):
     value: JsonValue
 
 
+class ProposalBase(StrictModel):
+    """The compiled file a proposal applies to. A PR head has no producer until
+    M5, and nothing here could say what a fork's head means, so one that isn't
+    null is refused."""
+
+    blob_sha: StrictStr
+    pr_head_sha: None
+
+
+class HealProposal(StrictModel):
+    """A proposal as `replay.json` holds it (DATA_MODEL §7)."""
+
+    id: StrictStr
+    compiled: StrictStr
+    base: ProposalBase
+    patch: list[PatchOp]
+
+
 def apply_patch(document: object, patch: Sequence[PatchOp]) -> None:
     """Apply `patch` to `document`, parsed JSON, in place and in order, each path
     read against what the last change left (RFC 6902). Any path is followed:

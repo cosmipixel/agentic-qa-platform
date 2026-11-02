@@ -52,6 +52,9 @@ from aqa_runner.run_record import LineCheck
 LOCK_SECONDS: Final = 10.0
 _RETRY_SECONDS: Final = 0.05
 _CHANGED: Final = "the compiled script changed during the run"
+# What an editor may put before a compiled file's text. The loader reads past it,
+# and `aqa heal apply` keeps it.
+BYTE_ORDER_MARK: Final = "\ufeff"
 
 
 class PublishError(Exception):
@@ -116,7 +119,11 @@ def publication(root: Path, spec: Spec) -> Publication:
 def published_text(script: CompiledScript) -> str:
     """The exact text a compiled script is published as: JSON without null
     fields, indented for reviewable diffs, with a final newline."""
-    document = script.model_dump(mode="json", exclude_none=True)
+    return document_text(script.model_dump(mode="json", exclude_none=True))
+
+
+def document_text(document: object) -> str:
+    """`document` in the form a compiled script is published in."""
     return json.dumps(document, indent=2, ensure_ascii=False) + "\n"
 
 
@@ -133,6 +140,14 @@ async def publish(
     _due(deadline)
     text = published_text(script)
     check(text)
+    await publish_text(at, script, text, deadline=deadline)
+
+
+async def publish_text(
+    at: Publication, script: CompiledScript, text: str, *, deadline: float
+) -> None:
+    """Publish `text`, which holds `script`, as `publish` does once its text is
+    checked: `aqa heal apply` writes a text that keeps what the file held."""
     lock = await _locked(at, deadline)
     try:
         _replace(at, script, text, deadline)
@@ -207,7 +222,7 @@ def _replace(
     ):
         raise PublishError("the project's subject contracts changed during the run")
     try:
-        parse_compiled(text, config, source=at.target)
+        parse_compiled(text.removeprefix(BYTE_ORDER_MARK), config, source=at.target)
     except SpecError:
         raise PublishError("the script doesn't load as written") from None
     # Again, as a link may have appeared while the lock was awaited.

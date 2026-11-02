@@ -33,7 +33,7 @@ from aqa_runner.admission import BoundValueSpelledError, admitted
 from aqa_runner.bound_secrets import BoundSecret, MissingSecretError, SecretLoggedError
 from aqa_runner.locator_generation import register_identity_engine
 from aqa_runner.model_turns import Spending
-from aqa_runner.publication import publication
+from aqa_runner.publication import Publication, publication
 from aqa_runner.redaction import NO_SECRETS, Redactor
 from aqa_runner.repairs import Repair
 from aqa_runner.strict_replay import Replayed, StrictRun, strict_replay
@@ -44,6 +44,7 @@ from playwright.async_api import Playwright, async_playwright
 # plan (ADR-0024's outcomes), and its exit code (API.md §7).
 Failure = Literal[
     "gave_up",
+    "stale",
     "spec_error",
     "no_response",
     "record_error",
@@ -52,6 +53,7 @@ Failure = Literal[
 ]
 EXIT_CODES: Final[Mapping[Failure, int]] = {
     "gave_up": 3,
+    "stale": 3,
     "spec_error": 5,
     "no_response": 11,
     "secret_unusable": 12,
@@ -243,7 +245,7 @@ def admitted_runs(paths: Sequence[Path], url: str | None) -> list[StrictRun]:
         except SpecError as error:
             stop("spec_error", str(path), _NOTHING, error.problems, scan=scan)
         spec_id = spec.frontmatter.id
-        script, raw = _compiled(root, spec, config, scan)
+        _, script, raw = found_script(root, spec, config, scan)
         try:
             _, _, bound, _ = admitted(script, spec, config, start)
         except BoundValueSpelledError as error:
@@ -261,13 +263,13 @@ def admitted_runs(paths: Sequence[Path], url: str | None) -> list[StrictRun]:
     return runs
 
 
-def _compiled(
+def found_script(
     root: Path, spec: Spec, config: ProjectConfig, scan: Redactor
-) -> tuple[CompiledScript, bytes]:
-    """`spec`'s compiled script, read as explore reads it, and the bytes it was
-    read from, or a stop scanned with `scan`: none, a link on the way
-    (`publication`) and one that doesn't load are spec errors, and one that
-    can't be read is 15."""
+) -> tuple[Publication, CompiledScript, bytes]:
+    """`spec`'s compiled script, read as explore reads it, where it was found,
+    before that read, and the bytes it was read from, or a stop scanned with
+    `scan`: none, a link on the way (`publication`) and one that doesn't load
+    are spec errors, and one that can't be read is 15."""
     spec_id = spec.frontmatter.id
     try:
         at = publication(root, spec)
@@ -278,7 +280,7 @@ def _compiled(
     if at.found is None:
         stop("spec_error", spec_id, _MISSING, scan=scan)
     try:
-        return read_compiled(at.target, config)
+        return (at, *read_compiled(at.target, config))
     except OSError:
         stop("record_error", spec_id, _UNREAD, scan=scan)
     except SpecError as error:
