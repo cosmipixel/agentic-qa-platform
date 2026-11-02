@@ -55,10 +55,15 @@ def heal(
     aqa heal apply <proposal_id> writes a proposal to the compiled script, and
     commits nothing. A spec file named apply is ./apply."""
     match words:
-        case ["apply", proposal]:
+        case ["apply", proposal] if url is None:
             _apply(proposal)
-        case [spec]:
+        case [spec] if spec != "apply":
             run([Path(spec)], url=url)
+        case _:
+            raise typer.BadParameter(
+                "give one spec, or apply and a proposal's id with no --url",
+                param_hint="'SPEC | apply PROPOSAL_ID'",
+            )
 
 
 def _spec_root_above(directory: Path) -> Path:
