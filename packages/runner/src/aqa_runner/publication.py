@@ -89,12 +89,15 @@ class Found:
 @dataclass(frozen=True)
 class Publication:
     """Where a run publishes and what it found there when it began: the spec
-    root, the spec's file and ID, and the compiled file, None when absent."""
+    root, the spec's file and ID, and the compiled file, None when absent.
+    `own_root` is for a command that found the root itself, so it must never
+    be a link. A person who names a spec through a link has chosen that link."""
 
     root: Path
     spec: Path
     spec_id: str
     found: Found | None
+    own_root: bool = False
 
     @property
     def target(self) -> Path:
@@ -325,7 +328,8 @@ def _found(target: Path) -> Found | None:
 
 def _first_link(at: Publication) -> Path | None:
     compiled, locks = at.target.parent, at.lock.parent
-    places = (compiled, at.target, locks.parent, locks, at.lock)
+    root = (at.root,) if at.own_root else ()
+    places = (*root, compiled, at.target, locks.parent, locks, at.lock)
     return next((place for place in places if place.is_symlink()), None)
 
 

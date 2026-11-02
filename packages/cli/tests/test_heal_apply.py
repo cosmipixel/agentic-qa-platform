@@ -354,6 +354,64 @@ def test_a_spec_root_is_needed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     )
 
 
+@pytest.mark.parametrize(
+    "config",
+    ["budgets: { resolve_seconds: 1 }\n", "not_a_key_aqa_reads: true\n"],
+    ids=["a-project-that-loads", "one-that-doesnt"],
+)
+def test_a_spec_root_that_is_a_link_is_refused_before_it_is_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: str
+) -> None:
+    """A repository can commit `qa` as a link into another checkout, where the write
+    would land. The second case shows nothing behind the link was read."""
+    other = tmp_path / "other" / "qa"
+    committed(other)
+    proposal = recorded(other, REBIND)
+    (other / "config.yaml").write_text(config)
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / "qa").symlink_to("../other/qa")
+    before = files(tmp_path)
+
+    result = apply(checkout, monkeypatch, proposal)
+
+    assert result.exit_code == 5, result.output
+    assert result.stderr == (
+        f"spec_error {proposal}: nothing was applied\n"
+        f"  {checkout / 'qa'}: a link, which could lead into another checkout: run "
+        "this inside the project you mean\n"
+    )
+    assert result.stdout == ""
+    assert files(tmp_path) == before
+
+
+def test_a_spec_root_that_becomes_a_link_writes_nothing_through_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "qa"
+    target = committed(root)
+    written = target.read_bytes()
+    proposal = recorded(root, REBIND)
+    moved = tmp_path / "moved"
+
+    async def linking_it_first(*args: Any, **kwargs: Any) -> None:
+        root.rename(moved)
+        root.symlink_to(moved)
+        await publication.publish_text(*args, **kwargs)
+
+    monkeypatch.setattr(heal_module, "publish_text", linking_it_first)
+
+    result = apply(root, monkeypatch, proposal)
+
+    assert result.exit_code == 3, result.output
+    assert result.stderr == (
+        f"gave_up {proposal}: nothing was applied\n"
+        "  a directory or file explore publishes through became a link\n"
+    )
+    assert (moved / ".compiled" / "order.json").read_bytes() == written
+    assert not (moved / ".aqa" / "locks").exists()
+
+
 def test_a_project_that_doesnt_load_exits_5(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

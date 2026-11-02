@@ -185,6 +185,24 @@ def test_a_link_that_appears_during_the_run_publishes_nothing(
     assert not at.target.exists()
 
 
+def test_a_spec_root_named_through_a_link_publishes_where_it_leads(
+    tmp_path: Path,
+) -> None:
+    """The person chose that link. `aqa heal apply`, which finds its own root, refuses
+    one (`test_heal_apply.py`)."""
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    at = project(link)
+    script = script_for(at)
+
+    published(at, script)
+
+    written = real / ".compiled" / "replay.json"
+    assert written.read_text(encoding="utf-8") == published_text(script)
+
+
 def test_a_compiled_file_that_cannot_be_read_raises_at_the_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
