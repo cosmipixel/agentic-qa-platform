@@ -36,3 +36,7 @@ Option 1, used where its features genuinely fit:
 - **Why.** The format stored `replay_safe` and `side_effect` as two independent booleans, which could say "both" or "neither" even though every step is exactly one of the two (ARCHITECTURE §3.3). One boolean makes both states unwritable and matches the existing `run_steps.side_effect` column and the heal validator's wording.
 - **Options not taken.** An enum (`effect: "replay_safe" | "side_effect"`) keeps both names visible in the file, but `run_steps.side_effect` would have to mirror it. Keeping both flags with an exactly-one-true rule changes the fewest docs but leaves the invalid states writable.
 - **Scope.** ADR-0003's "replay-safety flags" (addendum item 4) now means this flag. Nothing had produced compiled scripts yet, so `schema_version` stays 1 and nothing needs migrating.
+
+## Amendment (2026-11-02): the heal subgraph as built (#244)
+
+The heal subgraph is a LangGraph graph per drift, called by replay's repair (`aqa_runner.heal`), with `recursion_limit` above the run's turns left, so the budget stops it, never LangGraph. Its checkpoints stay in memory, and this makes no claim to resume one.

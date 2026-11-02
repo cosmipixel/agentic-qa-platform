@@ -176,7 +176,7 @@ The part of a run that handles drift: it re-observes the page, repairs bindings,
 _Avoid_: auto-fix
 
 **Verdict**:
-The classified outcome of a step: `pass`, `drift_consistent`, `expectation_violated` or `inconclusive`. Every verdict cites evidence.
+The classified outcome of a step: `pass`, `drift_consistent`, `expectation_violated` or `inconclusive`. Every verdict cites evidence. A heal's `confidence` beside a verdict is the model's own report, uncalibrated, and decides nothing. `aqa run`'s run document says `mode: run`, `aqa replay`'s `mode: strict`.
 
 **`drift_consistent`**:
 The verdict that the UI changed, and that after rebinding targets and inserting replay-safe steps every assertion evaluates and passes and every invariant holds. It produces a heal proposal and claims nothing about why the UI changed.
