@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 import warnings
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Coroutine, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -20,12 +20,12 @@ from decimal import Decimal
 from pathlib import Path
 from re import Pattern
 from stat import S_ISDIR
-from typing import Any, Literal, TypedDict, cast
+from typing import Any, Final, Literal, TypedDict, cast
 
 import yaml
-from aqa_core.config import Effort, ModelRole, ProjectConfig
+from aqa_core.config import Effort, ModelRole, ModelRoleName, ProjectConfig
 from aqa_core.coverage_plan import uncovered
-from aqa_core.model_costs import CostRecord, Usage, cost_record
+from aqa_core.model_costs import CostRecord, Mode, Usage, cost_record
 from aqa_core.model_roles import RoutedModel, resolve_roles
 from aqa_core.price_map import vendored
 from aqa_core.project import load_compiled, load_config, load_spec
@@ -38,6 +38,8 @@ from aqa_runner.anthropic_client import (
 from aqa_runner.coverage_plan import make_plan
 from aqa_runner.explore import Drivers, Ended, Explored, explore
 from aqa_runner.model_router import ModelCallError, ModelRouter, Routed
+from aqa_runner.replay_result import EXIT_CODES
+from aqa_runner.replay_result import Outcome as ReplayOutcome
 from aqa_runner.run_record import COSTS
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration
@@ -47,6 +49,7 @@ from vcr.persisters.filesystem import FilesystemPersister
 
 from packages.runner.tests.conftest import CASSETTES, REDIRECTS, _canonical, _vcr
 from packages.runner.tests.executor_fixtures import serving_app
+from packages.runner.tests.heal_fixtures import HEAL_CASES, heal_recorded, heal_spec
 from packages.runner.tests.injection_fixtures import CASES as INJECTION_CASES
 from packages.runner.tests.injection_fixtures import explored_case
 from packages.runner.tests.test_anthropic_client import (
@@ -64,19 +67,8 @@ ROOT = Path(__file__).resolve().parents[3]
 PILOTS = ROOT / "bench/apps/conduit/qa"
 # The injection pages' explores (#57), by cassette name.
 INJECTED = {case.cassette: case for case in INJECTION_CASES}
-CASES = (
-    "coverage_plan",
-    "tools",
-    "structured_output",
-    "plain_with_effort",
-    "plan_login",
-    "plan_read-article",
-    "plan_post-comment",
-    "plan_favorite-article",
-    "plan_publish-article",
-    "explore_fixture",
-    *INJECTED,
-)
+# The drift pages' `aqa run`s (#244), by cassette name.
+HEALED = {case.cassette: case for case in HEAL_CASES}
 # The whole explore of the fixture spec: the plan and every turn.
 EXPLORE = "explore_fixture"
 # The explore's own guard: the run stops calling once it has spent this. One
@@ -110,6 +102,9 @@ SCRUBBED = ("qa/.aqa", "qa/.compiled")
 # The injection round's limit (#57), a round of its own; each run's is its
 # case config's model_usd.
 INJECTION_ROUND_USD = Decimal("0.80")
+# The heal round's limit (#244), approved; each run's is its config's
+# heal_model_usd.
+HEAL_ROUND_USD: Final = Decimal("0.25")
 
 
 class SpendRefusedError(Exception):
@@ -146,11 +141,13 @@ class Allowance:
     held: Reservation | None = None
     refused: bool = False
     overrun: bool = False
+    role: ModelRoleName = "navigator"
+    mode: Mode = "explore"
 
     def price(self, usage: Usage) -> Decimal:
         return cost_record(
-            role="navigator",
-            mode="explore",
+            role=self.role,
+            mode=self.mode,
             model=self.model,
             usage=usage,
             latency_ms=0,
@@ -403,7 +400,10 @@ class Capture:
 
 
 def accounted(
-    responses: list[dict[str, Any]], calls: tuple[CostRecord, ...], model: RoutedModel
+    responses: list[dict[str, Any]],
+    calls: tuple[CostRecord, ...],
+    model: RoutedModel,
+    labels: tuple[ModelRoleName, Mode],
 ) -> tuple[tuple[CostRecord, ...], bool]:
     """Price every usable observation. Each cost line, in the order the run
     priced them, is matched to the next 200 response after the last match
@@ -434,8 +434,8 @@ def accounted(
         matched[index]
         if index in matched
         else cost_record(
-            role="navigator",
-            mode="explore",
+            role=labels[0],
+            mode=labels[1],
             model=model,
             usage=Usage.model_validate(response["usage"]),
             latency_ms=response["response_interval_ms"],
@@ -451,7 +451,7 @@ class Ending(TypedDict):
     """How an explore ended, in fields that can't spell a value."""
 
     exit_code: int
-    outcome: Ended
+    outcome: Ended | ReplayOutcome
     published: Literal["confirmed", "unconfirmed"] | None
 
 
@@ -547,22 +547,19 @@ def plan_case(name: str) -> bool:
 
 def round_limit(name: str) -> Decimal | None:
     """The round limit of a case recorded within the spend bound, with the
-    SDK's retries off: the explore case's and the plan cases'. The other
-    cases keep the SDK's retries and no bound."""
-    if name == EXPLORE:
-        return ROUND_USD
-    if name in INJECTED:
-        return INJECTION_ROUND_USD
-    return PLANS_ROUND_USD if plan_case(name) else None
+    SDK's retries off. A case with none keeps the SDK's retries and no bound."""
+    return CASES[name].round_usd
 
 
 def answers_expected(name: str, calls: tuple[CostRecord, ...]) -> int:
     """One answer per case. A plan case holds two when its plan couldn't be
     used and make_plan asked once more: two answers, both `ok` (ADR-0024's
-    #161 amendment). A refusal and its fallback stay rejected. The explore
-    case holds one per priced call: the plan's, its retry's, each turn's, and
-    so does an injection case, less those it replayed."""
-    if name == EXPLORE or name in INJECTED:
+    #161 amendment). A refusal and its fallback stay rejected. A case of a whole
+    run holds one per priced call, each turn's, less those it replayed; a heal
+    case's turn is one, so it holds one."""
+    if name in HEALED:
+        return 1
+    if CASES[name].whole_run:
         return len(calls)
     retried = plan_case(name) and [call.status for call in calls] == ["ok", "ok"]
     return 2 if retried else 1
@@ -627,11 +624,16 @@ async def explored(
     return costs, confirmed, ending
 
 
+def cost_lines(record: Path | None) -> tuple[CostRecord, ...]:
+    """A run's priced calls, as its own cost lines keep them."""
+    costs = None if record is None else record / COSTS
+    lines = costs.read_text().splitlines() if costs and costs.is_file() else []
+    return tuple(map(CostRecord.model_validate_json, lines))
+
+
 def ended(run: Explored) -> tuple[tuple[CostRecord, ...], Ending]:
     """The run's priced calls, as its own cost lines keep them, and how it
     ended."""
-    costs = None if run.record is None else run.record / COSTS
-    lines = costs.read_text().splitlines() if costs and costs.is_file() else []
     said = run.document.get("published")
     ending = Ending(
         exit_code=run.exit_code,
@@ -642,7 +644,7 @@ def ended(run: Explored) -> tuple[tuple[CostRecord, ...], Ending]:
         if said == "unconfirmed"
         else None,
     )
-    return tuple(map(CostRecord.model_validate_json, lines)), ending
+    return cost_lines(run.record), ending
 
 
 async def explored_injection(
@@ -656,15 +658,94 @@ async def explored_injection(
     return costs, disallowed is None, ending, disallowed
 
 
+async def healed(
+    name: str, router: ModelRouter, spec: Spec
+) -> tuple[tuple[CostRecord, ...], bool, Ending, str | None]:
+    """A heal case's `aqa run` on its drift page (#244): its priced calls, whether
+    it ended in the proposal the case expects, how it ended, and, in fixed
+    words, why it didn't."""
+    replayed, disallowed = await heal_recorded(HEALED[name], spec, router)
+    ending = Ending(
+        exit_code=EXIT_CODES[replayed.outcome],
+        outcome=replayed.outcome,
+        published=None,
+    )
+    return cost_lines(replayed.record), disallowed is None, ending, disallowed
+
+
 async def answered(
     name: str, router: ModelRouter, spec: Spec
 ) -> tuple[tuple[CostRecord, ...], bool, Ending | None, str | None]:
-    if name == EXPLORE:
-        return (*await explored(router, spec), None)
-    if name in INJECTED:
-        return await explored_injection(name, router, spec)
+    return await CASES[name].runner(name, router, spec)
+
+
+async def _explored_fixture(
+    _name: str, router: ModelRouter, spec: Spec
+) -> tuple[tuple[CostRecord, ...], bool, Ending, None]:
+    return (*await explored(router, spec), None)
+
+
+async def _asked(
+    name: str, router: ModelRouter, spec: Spec
+) -> tuple[tuple[CostRecord, ...], bool, None, None]:
     routed, accepted = await ask(name, router, spec)
     return routed.calls, accepted, None, None
+
+
+type Runner = Callable[
+    [str, ModelRouter, Spec],
+    Coroutine[Any, Any, tuple[tuple[CostRecord, ...], bool, Ending | None, str | None]],
+]
+
+
+@dataclass(frozen=True)
+class RecordedCase:
+    """What one case is recorded as, so nothing reads a role from its name: the
+    role and mode its calls are labelled and priced by, its round's limit, what
+    bounds one run of it, and what answers it. `whole_run` says it is a run that
+    leaves a record, rather than one call."""
+
+    runner: Runner
+    role: ModelRoleName = "navigator"
+    mode: Mode = "explore"
+    round_usd: Decimal | None = None
+    run_usd: Callable[[ProjectConfig], Decimal] = lambda _: RUN_USD
+    whole_run: bool = False
+
+
+_PLANNED = RecordedCase(_asked, round_usd=PLANS_ROUND_USD)
+CASES: Final[Mapping[str, RecordedCase]] = {
+    "coverage_plan": _PLANNED,
+    "tools": RecordedCase(_asked),
+    "structured_output": RecordedCase(_asked),
+    "plain_with_effort": RecordedCase(_asked),
+    "plan_login": _PLANNED,
+    "plan_read-article": _PLANNED,
+    "plan_post-comment": _PLANNED,
+    "plan_favorite-article": _PLANNED,
+    "plan_publish-article": _PLANNED,
+    EXPLORE: RecordedCase(_explored_fixture, round_usd=ROUND_USD, whole_run=True),
+    **dict.fromkeys(
+        INJECTED,
+        RecordedCase(
+            explored_injection,
+            round_usd=INJECTION_ROUND_USD,
+            run_usd=lambda config: Decimal(str(config.budgets.model_usd)),
+            whole_run=True,
+        ),
+    ),
+    **dict.fromkeys(
+        HEALED,
+        RecordedCase(
+            healed,
+            role="healer",
+            mode="heal",
+            round_usd=HEAL_ROUND_USD,
+            run_usd=lambda config: Decimal(str(config.budgets.heal_model_usd)),
+            whole_run=True,
+        ),
+    ),
+}
 
 
 def admitting(vcr: Any, capture: Capture, allowance: Allowance) -> None:
@@ -725,10 +806,14 @@ def finish(
     model: RoutedModel,
 ) -> None:
     """Attempt a priced receipt even when other evidence could not be saved."""
-    explores = name == EXPLORE or name in INJECTED
-    scrubbed = scrub(attempt, state, name) if explores and capture.withheld else []
+    case = CASES[name]
+    scrubbed = (
+        scrub(attempt, state, name) if case.whole_run and capture.withheld else []
+    )
     fresh = unreused(state.calls, state.reused)
-    state.costs, mismatch = accounted(capture.responses, fresh, model)
+    state.costs, mismatch = accounted(
+        capture.responses, fresh, model, (case.role, case.mode)
+    )
     unpriced = [
         index
         for index, response in enumerate(capture.responses)
@@ -892,11 +977,20 @@ def bounded(
         preloaded(name, attempt, library) if name == EXPLORE or name in INJECTED else []
     )
     capture.replayed = frozenset(each.request for each in reusable)
-    if (limit := round_limit(name)) is not None:
-        model = resolve_roles(config, vendored())["navigator"].model
-        # An injection run's limit is its own config's model_usd (#57).
-        cap = Decimal(str(config.budgets.model_usd)) if name in INJECTED else RUN_USD
-        admitting(vcr, capture, Allowance(model, cap, round_left(attempt, limit)))
+    case = CASES[name]
+    if (limit := case.round_usd) is not None:
+        model = resolve_roles(config, vendored())[case.role].model
+        admitting(
+            vcr,
+            capture,
+            Allowance(
+                model,
+                case.run_usd(config),
+                round_left(attempt, limit),
+                role=case.role,
+                mode=case.mode,
+            ),
+        )
     replaying = {"record_mode": "new_episodes", "drop_unused_requests": True}
     return reusable, replaying if reusable else {}
 
@@ -922,7 +1016,7 @@ def capture_attempt(
     vcr.register_persister(persister)
     state = AttemptState()
     config = load_config(spec.path.parent / "config.yaml")
-    model = resolve_roles(config, vendored())["navigator"].model
+    model = resolve_roles(config, vendored())[CASES[name].role].model
     reusable, replaying = bounded(
         name, attempt, library, vcr=vcr, capture=capture, config=config
     )
@@ -1014,6 +1108,9 @@ def record(
         spec = fixture(attempt / "qa")
     elif name in INJECTED:
         spec = INJECTED[name].spec(attempt / "qa", FIXTURE_CONFIG)
+    elif name in HEALED:
+        (attempt / "qa").mkdir()
+        spec = heal_spec(HEALED[name], attempt / "qa")
     else:
         spec = checkout(attempt / "qa")
     config = load_config(spec.path.parent / "config.yaml")
@@ -1024,14 +1121,15 @@ def record(
     router = ModelRouter.from_config(
         config, AnthropicClient if round_limit(name) is None else retryless
     )
-    role = resolve_roles(config, vendored())["navigator"]
+    role_name = CASES[name].role
+    role = resolve_roles(config, vendored())[role_name]
     intent = {
         "case": name,
         "source_sha": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
         ).strip(),
         "started_at": datetime.now(UTC).isoformat(),
-        "role": "navigator",
+        "role": role_name,
         "provider": role.model.provider,
         "model": role.model.name,
         "effort": role.effort,
