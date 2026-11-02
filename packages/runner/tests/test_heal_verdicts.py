@@ -1,7 +1,7 @@
 """What a run that heals says of itself (#244; ADR-0024's #244 amendment): real
 Chromium against #240's drift pages, a scripted model, through
-`replays.replay_run` and `replay_result.present`. `test_replay_result.py` holds
-the rules by hand; these hold what a real heal leaves."""
+`replays.replay_run` and `replay_result.present`. `test_replay_result_heals.py`
+holds the rules by hand; these hold what a real heal leaves."""
 
 from pathlib import Path
 from typing import Any
