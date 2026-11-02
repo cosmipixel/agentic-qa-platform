@@ -8,7 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from aqa_core.compiled import CompiledScript, Press
+from aqa_core.compiled import CompiledScript, Press, Target
 from aqa_runner.evaluation import AssertionResult
 from aqa_runner.repairs import Drift
 
@@ -150,6 +150,75 @@ def test_a_refused_or_given_up_assertion_repair_ends_the_handoff(
         "misses": ["not unanimous", "no match"],
         "problems": problems,
         "script": None,
+    }
+
+
+# Two positive checks that drift, then one on the heading, which doesn't.
+TWO_DRIFTS_THEN_THE_HEADING = fx.compiled(
+    [],
+    targets={"toggle": TOGGLE, "contact": CONTACT, "heading": HEADING},
+    assertions=[
+        seen_on("toggle", "a1"),
+        seen_on("contact", "a2"),
+        seen_on("heading", "a3"),
+    ],
+)
+
+
+def contact_rebound(script: CompiledScript) -> CompiledScript:
+    """`script` with its contact button bound as the moved page has it."""
+    footer = {**CONTACT, "locators": [{"css": "button", "scope": {"css": "footer"}}]}
+    targets = {**script.targets, "contact": Target.model_validate(footer)}
+    return script.model_copy(update={"targets": targets})
+
+
+async def rebinding_each_as_time_passes(drift: Drift) -> CompiledScript:
+    """The script `drift` handed over, with the drifted check's target rebound,
+    and what a check already passed on hidden first: the heading for the
+    toggle, and the toggle for the contact button."""
+    if drift.at.key == "assertion-0":
+        await drift.session.page.evaluate(
+            "document.querySelector('h1').style.display = 'none'"
+        )
+        return rebound(drift.script)
+    await drift.session.page.evaluate(
+        "document.querySelector('#order button').style.display = 'none'"
+    )
+    return contact_rebound(drift.script)
+
+
+def test_each_drifted_assertion_target_goes_to_its_own_repair_in_turn(
+    tmp_path: Path,
+) -> None:
+    run = repairing(
+        tmp_path,
+        rebinding_each_as_time_passes,
+        script=TWO_DRIFTS_THEN_THE_HEADING,
+        spec_at=in_view_spec,
+    )
+
+    assert [(drift.at.key, drift.misses) for drift in run.handed] == [
+        ("assertion-0", MISSES),
+        ("assertion-1", ("no match",)),
+    ]
+    assert run.result.assertions == (
+        AssertionResult("a1", "pass", locator_index=0),
+        AssertionResult("a2", "pass", locator_index=0),
+        AssertionResult("a3", "pass", locator_index=0),
+    )
+    assert document(run, "assertion-0") == {
+        "assertion": "a1",
+        "misses": ["not unanimous", "no match"],
+        "problems": [],
+        "script": rebound(run.committed).model_dump(mode="json", exclude_none=True),
+    }
+    assert document(run, "assertion-1") == {
+        "assertion": "a2",
+        "misses": ["no match"],
+        "problems": [],
+        "script": contact_rebound(rebound(run.committed)).model_dump(
+            mode="json", exclude_none=True
+        ),
     }
 
 
