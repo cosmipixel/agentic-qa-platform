@@ -222,6 +222,36 @@ def test_each_drifted_assertion_target_goes_to_its_own_repair_in_turn(
     }
 
 
+# The contact button seen, which drifts while nothing finds it, and not visible,
+# which that absence passes.
+CONTACT_SEEN_AND_NOT_VISIBLE = fx.compiled(
+    [],
+    targets={"contact": CONTACT},
+    assertions=[
+        seen_on("contact", "a1"),
+        {"id": "a2", "expect_index": 0, "check": "not_visible", "target": "contact"},
+    ],
+)
+
+
+def test_a_not_visible_check_on_a_rebound_target_is_evaluated_again(
+    tmp_path: Path,
+) -> None:
+    run = repairing(
+        tmp_path,
+        lambda drift: contact_rebound(drift.script),
+        script=CONTACT_SEEN_AND_NOT_VISIBLE,
+        spec_at=in_view_spec,
+    )
+
+    assert [drift.at.key for drift in run.handed] == ["assertion-0"]
+    assert run.result.assertions == (
+        AssertionResult("a1", "pass", locator_index=0),
+        AssertionResult("a2", "failed", locator_index=0),
+    )
+    assert run.result.outcome == "failed"
+
+
 def test_a_not_visible_checks_drift_goes_to_no_repair(tmp_path: Path) -> None:
     banner = {
         "semantic": "the order's banner",
