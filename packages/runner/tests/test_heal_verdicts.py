@@ -6,7 +6,13 @@ holds the rules by hand; these hold what a real heal leaves."""
 from pathlib import Path
 from typing import Any
 
-from packages.runner.tests.drift_fixtures import BUTTON, SUMMARY, TOGGLE
+from packages.runner.tests.drift_fixtures import (
+    BUTTON,
+    SHIPPING,
+    SUMMARY,
+    TOGGLE,
+    page,
+)
 from packages.runner.tests.executor_fixtures import compiled
 from packages.runner.tests.explore_graph_fixtures import NO_RESPONSE
 from packages.runner.tests.heal_fixtures import (
@@ -25,6 +31,7 @@ THE_TOGGLE_MOVED = [
     {"role": "button", "name": "Show details"},
     {"css": "button", "scope": {"css": "#order"}},
 ]
+REMOVED = page("removed")
 SHOWN = MOVED.replace(" hidden>", ">")
 THE_SUMMARY = rebinding("paragraph", "Order 42 ships on Monday")
 # The summary's two checks, with a locator that finds nothing, so both drift on
@@ -190,6 +197,80 @@ def test_a_rebound_step_in_a_run_that_fails_is_inconclusive_with_no_proposal(
         "heal rebound its target, but the run didn't pass"
     )
     assert run.verdict("assertion", "a1")["verdict"] == "expectation_violated"
+    assert run.verdict("assertion", "a1")["finding"] == {
+        "category": "functional",
+        "title": SHIPPING,
+        "repro_steps": [0, 1],
+        "rebound_steps": [1],
+    }
+
+
+def test_the_removed_page_with_a_best_guess_is_violated_and_its_findings_list_the_step(
+    tmp_path: Path,
+) -> None:
+    """The toggle is gone and the model offers the nearest button. Its click shows
+    nothing, so both checks read false. The rebinding may be why: the findings say
+    which step it was, and the step's own entry what it bound."""
+    run = healed(tmp_path, rebinding("button", "Contact us"), html=REMOVED)
+
+    written = run.document
+    assert (written["outcome"], written["exit_code"], written["heal_proposal"]) == (
+        "expectation_violated",
+        1,
+        None,
+    )
+    assert run.verdict("step", 1)["heal"]["bound"] == 'button "Contact us"'
+    assert run.verdict("assertion", "a1")["finding"] == {
+        "category": "functional",
+        "title": SHIPPING,
+        "repro_steps": [0, 1],
+        "rebound_steps": [1],
+    }
+    assert run.verdict("assertion", "a2")["finding"] == {
+        "category": "visual",
+        "title": SHIPPING,
+        "repro_steps": [0, 1],
+        "rebound_steps": [1],
+    }
+
+
+def test_the_removed_page_with_no_pick_is_inconclusive(tmp_path: Path) -> None:
+    """No check ran, and a model's "nothing fits" is no evidence of a bug: a page
+    that only moved its toggle can draw the same reply (ADR-0024's #245 amendment)."""
+    run = healed(tmp_path, NO_TOOL, html=REMOVED)
+
+    written = run.document
+    assert (written["outcome"], written["exit_code"], written["heal_proposal"]) == (
+        "inconclusive",
+        3,
+        None,
+    )
+    assert written["reasons"] == [
+        f"step 1: inconclusive, drift: heal gave up: {FOUND_NONE} (no match, no match)"
+    ]
+    assert [each["finding"] for each in written["verdicts"]] == [None, None]
+
+
+def test_an_invariant_that_fails_after_a_repair_is_a_finding_listing_the_step(
+    tmp_path: Path,
+) -> None:
+    html = MOVED.replace('onclick="', "onclick=\"console.error('it broke'); ")
+
+    run = healed(tmp_path, SHOW, html=html)
+
+    written = run.document
+    assert (written["outcome"], written["exit_code"], written["heal_proposal"]) == (
+        "expectation_violated",
+        1,
+        None,
+    )
+    assert run.verdict("assertion", "a1")["verdict"] == "pass"
+    assert run.verdict("invariant", "console_errors")["finding"] == {
+        "category": "js_error",
+        "title": "invariant console_errors violated",
+        "repro_steps": [0, 1],
+        "rebound_steps": [1],
+    }
 
 
 def test_a_heal_that_found_nothing_is_inconclusive_and_cites_what_it_left(
