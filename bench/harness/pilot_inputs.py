@@ -8,13 +8,7 @@ from pathlib import Path
 
 from aqa_core.compiled import CompiledScript
 from aqa_core.config import ProjectConfig
-from aqa_core.project import (
-    SpecError,
-    load_compiled,
-    load_project,
-    path_on_origin,
-    start_origin,
-)
+from aqa_core.project import SpecError, load_compiled, load_project, start_origin
 from aqa_core.schema import parse_origin
 from aqa_core.spec import Spec
 from aqa_runner.admission import admitted
@@ -28,13 +22,6 @@ class UnusableSecretError(ValueError):
 
 
 @dataclass(frozen=True)
-class ResetRequest:
-    """The spec's reset hook: a POST to this URL on the run's start origin."""
-
-    url: str
-
-
-@dataclass(frozen=True)
 class PilotInput:
     """One selected pilot, admitted for replay."""
 
@@ -42,7 +29,6 @@ class PilotInput:
     config: ProjectConfig
     script: CompiledScript
     start: str
-    reset: ResetRequest | None
 
 
 def load_pilots(
@@ -106,7 +92,7 @@ def validate_pilot(
     prepared = _quietly(partial(_prepare, spec, config, script), SpecError)
     if prepared is None or not _covered(spec, script):
         raise ValueError(f"{source}: invalid pilot input")
-    start, reset, usable = prepared
+    start, usable = prepared
     if start != parse_origin(origin):
         raise ValueError(f"{source}: base_url is not the stack's origin")
     if (
@@ -117,7 +103,7 @@ def validate_pilot(
         raise ValueError(f"{source}: declares an origin beyond the stack's")
     if not usable:
         raise UnusableSecretError(f"{source}: unusable test secret")
-    return PilotInput(spec, config, script, start, reset)
+    return PilotInput(spec, config, script, start)
 
 
 def _quietly[T](read: Callable[[], T], *errors: type[Exception]) -> T | None:
@@ -132,12 +118,11 @@ def _quietly[T](read: Callable[[], T], *errors: type[Exception]) -> T | None:
 
 def _prepare(
     spec: Spec, config: ProjectConfig, script: CompiledScript
-) -> tuple[str, ResetRequest | None, bool]:
-    """The run's start origin, the spec's reset hook on it, and whether each
-    test secret the spec references binds for it once replay admits `script`
-    (`_secrets_bind`)."""
+) -> tuple[str, bool]:
+    """The run's start origin, and whether each test secret the spec
+    references binds for it once replay admits `script` (`_secrets_bind`)."""
     start = start_origin(None, config)
-    return start, _reset(spec, start), _secrets_bind(spec, config, script, start)
+    return start, _secrets_bind(spec, config, script, start)
 
 
 def _secrets_bind(
@@ -153,13 +138,6 @@ def _secrets_bind(
     environment = (MissingSecretError, SecretLoggedError, UnicodeEncodeError)
     bound = _quietly(partial(admitted, script, spec, config, start), *environment)
     return bound is not None
-
-
-def _reset(spec: Spec, start: str) -> ResetRequest | None:
-    """The spec's reset hook on `start`, joined as text, as replay's reset is:
-    loading the spec held it to POST and a path (`Reset.http`)."""
-    hook = spec.frontmatter.preconditions.reset
-    return None if hook is None else ResetRequest(path_on_origin(start, hook.path))
 
 
 def _covered(spec: Spec, script: CompiledScript) -> bool:
