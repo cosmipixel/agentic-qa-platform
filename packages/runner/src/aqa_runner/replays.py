@@ -17,6 +17,7 @@ from playwright.async_api import Browser, BrowserType
 from aqa_runner import executor
 from aqa_runner.egress import EgressGate
 from aqa_runner.egress_proxy import EgressProxy
+from aqa_runner.repairs import Repair
 from aqa_runner.reset import reset
 from aqa_runner.run_record import RunRecord
 
@@ -51,7 +52,7 @@ async def replay_run(
     opening: Callable[[], AbstractAsyncContextManager[Opened]],
     *,
     every_locator: bool,
-    repair: executor.Repair | None = None,
+    repair: Repair | None = None,
 ) -> executor.RunResult:
     """Send the spec's reset hook, when it has one, through the run's gate
     within `resolve_seconds` (`aqa_runner.reset.reset`), then enter
