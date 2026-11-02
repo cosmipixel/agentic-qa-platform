@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from aqa_core.compiled import VisibleUnoccluded
+from aqa_core.compiled import Target, VisibleUnoccluded
 from aqa_runner.evaluation import AssertionResult
 from aqa_runner.executor import RunResult, StepResult
 from aqa_runner.redaction import NO_SECRETS
@@ -160,6 +160,72 @@ def test_an_assertion_on_a_rebound_target_that_fails_is_a_violation_citing_the_h
     assert entry["finding"]["category"] == "visual"
     assert entry["heal"] == HEAL_CITED
     assert document(end)["exit_code"] == 1
+
+
+def with_the_check_on_save_called(run: Made, name: str) -> Made:
+    """`run`, whose check a4, the one reading `save`, has the id `name`."""
+    checks = [
+        check.model_copy(update={"id": name}) if check.id == "a4" else check
+        for check in run.script.assertions
+    ]
+    return replace(run, script=run.script.model_copy(update={"assertions": checks}))
+
+
+def test_a_check_with_a_steps_label_on_a_rebound_target_keeps_its_own_verdict(
+    tmp_path: Path,
+) -> None:
+    run = with_the_check_on_save_called(made(tmp_path), "step 9")
+    seen = AssertionResult("step 9", "pass", locator_index=0)
+    failed = AssertionResult("a2", "failed", locator_index=0)
+
+    end = ending(run, assertions=(seen, failed), **healing_the_step(run))
+
+    entry = judged(end, "assertion", "step 9")
+    assert (entry["verdict"], entry["reason"]) == ("pass", None)
+    assert entry["heal"] == HEAL_CITED
+
+
+def test_a_check_with_an_invariants_label_leaves_the_invariant_its_verdict(
+    tmp_path: Path,
+) -> None:
+    run = with_the_check_on_save_called(made(tmp_path), "invariant http_5xx")
+    seen = AssertionResult("invariant http_5xx", "pass", locator_index=0)
+
+    end = ending(run, assertions=(seen,), **healing_the_step(run))
+
+    assert judged(end, "invariant", "http_5xx")["verdict"] == "pass"
+    assert judged(end, "invariant", "http_5xx")["heal"] is None
+    assert judged(end, "assertion", "invariant http_5xx")["heal"] == HEAL_CITED
+
+
+def test_a_drifted_check_with_a_healed_steps_label_cites_no_repair_of_the_step(
+    tmp_path: Path,
+) -> None:
+    """The check's drift went to no repair; the one with its label is the step's."""
+    run = made(tmp_path)
+    check = VisibleUnoccluded.model_validate(
+        {
+            "id": "step 1",
+            "expect_index": 0,
+            "check": "visible_unoccluded",
+            "target": "status",
+            "min_size_px": [1, 1],
+            "in_viewport": True,
+        }
+    )
+    status = Target.model_validate({"semantic": "a status", "locators": [{"css": "i"}]})
+    update = {
+        "targets": {**run.script.targets, "status": status},
+        "assertions": [*run.script.assertions, check],
+    }
+    run = replace(run, script=run.script.model_copy(update=update))
+    drifted = AssertionResult("step 1", "binding_unresolved", MISSED)
+
+    end = ending(run, assertions=(drifted,), **healing_the_step(run))
+
+    entry = judged(end, "assertion", "step 1")
+    assert entry["reason"] == "drift: it went to no heal (no match)"
+    assert entry["heal"] is None
 
 
 def repaired_step(run: Made, **changes: Any) -> Repaired:
