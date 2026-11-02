@@ -4,6 +4,7 @@ holds the run's own rules. Real Chromium against #240's drift pages, on a script
 model."""
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,12 @@ def order_at(root: Path) -> Path:
 
 def heal(*args: str) -> typer.testing.Result:
     return typer.testing.CliRunner().invoke(aqa, ["heal", *args])
+
+
+def plain(shown: str) -> str:
+    """What Typer's box said, in one line. Its width wraps the words anywhere, and
+    under GITHUB_ACTIONS it forces colour, which splits an option from its dashes."""
+    return " ".join(re.sub(r"\x1b\[[0-9;]*m", "", shown).replace("│", " ").split())
 
 
 def test_heal_of_one_spec_is_a_run_of_it(
@@ -105,15 +112,14 @@ def test_heal_takes_one_spec_or_apply_and_an_id(
     result = heal(*words)
 
     assert result.exit_code == code, result.output
-    # Typer's error box wraps a usage error's words at any width.
-    assert said in " ".join(result.stderr.replace("│", " ").split())
+    assert said in plain(result.stderr)
 
 
 def test_heal_help_shows_both_forms() -> None:
     result = heal("--help")
 
     assert result.exit_code == 0, result.output
-    said = " ".join(result.stdout.split())
+    said = plain(result.stdout)
     assert "SPEC | apply PROPOSAL_ID" in said
     assert "aqa heal <spec>" in said
     assert "aqa heal apply <proposal_id>" in said
