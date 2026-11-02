@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from aqa_core.compiled import Click, CompiledScript, Fill, Press, Target
@@ -20,7 +20,8 @@ from aqa_runner.evaluation import AssertionResult
 from aqa_runner.executor import RunResult
 from aqa_runner.locator_generation import register_identity_engine
 from aqa_runner.locators import Miss
-from aqa_runner.repairs import Drift, StepAt
+from aqa_runner.redaction import NO_SECRETS
+from aqa_runner.repairs import Basis, Drift, ModelReported, Offer, StepAt
 from aqa_runner.replays import Opened, Replaying, replay_run
 from aqa_runner.run_record import RefusedWriteError, RunRecord
 from playwright.async_api import async_playwright
@@ -93,7 +94,7 @@ def secret_spec_at(root: Path) -> Path:
 
 def repairing(
     tmp_path: Path,
-    offer: Callable[[Drift], CompiledScript | Awaitable[CompiledScript]],
+    offer: Callable[[Drift], CompiledScript | Offer | Awaitable[CompiledScript]],
     *,
     script: CompiledScript = DETAILS,
     spec_at: Callable[[Path], Path] = shipping_spec,
@@ -112,10 +113,11 @@ def repairing(
     record = RunRecord.create(path.parent)
     handed: list[Drift] = []
 
-    async def repair(drift: Drift) -> CompiledScript:
+    async def repair(drift: Drift) -> Offer:
         handed.append(drift)
         offered = offer(drift)
-        return await offered if isinstance(offered, Awaitable) else offered
+        script = await offered if isinstance(offered, Awaitable) else offered
+        return script if isinstance(script, Offer) else Offer(script)
 
     with serving(html) as app:
         run_gate = gate(allowed=(app.origin,))
@@ -182,6 +184,89 @@ def repairs(run: Repairing) -> list[tuple[object, ...]]:
         (repaired.at.key, repaired.misses, repaired.problems, repaired.script)
         for repaired in run.result.repairs
     ]
+
+
+def test_a_taken_repairs_account_is_kept_and_recorded_beside_its_script(
+    tmp_path: Path,
+) -> None:
+    def offer(drift: Drift) -> Offer:
+        said = drift.session.redactor.redact
+        reported = ModelReported(0.9, said("it moved to the order"))
+        return Offer(rebound(drift.script), Basis(said('button "Show"'), reported))
+
+    run = repairing(tmp_path, offer)
+
+    [repaired] = run.result.repairs
+    assert repaired.basis == Basis(
+        NO_SECRETS.redact('button "Show"'),
+        ModelReported(0.9, NO_SECRETS.redact("it moved to the order")),
+    )
+    patched = rebound(run.committed)
+    assert document(run, 1) == {
+        "seq": 1,
+        "misses": ["not unanimous", "no match"],
+        "problems": [],
+        "script": patched.model_dump(mode="json", exclude_none=True),
+        "basis": {
+            "said": 'button "Show"',
+            "model_reported": {
+                "confidence": 0.9,
+                "rationale": "it moved to the order",
+            },
+            "stop": None,
+        },
+    }
+
+
+def test_a_repair_that_gives_up_says_why_and_any_run_stop_it_hit(
+    tmp_path: Path,
+) -> None:
+    def offer(drift: Drift) -> Offer:
+        said = drift.session.redactor.redact("the model gave no response")
+        return Offer(drift.script, Basis(said, stop="no_response"))
+
+    run = repairing(tmp_path, offer)
+
+    assert outcomes(run) == [(0, "completed", ()), (1, "drifted", MISSES)]
+    assert repairs(run) == [("1", MISSES, (), None)]
+    assert run.result.repairs[0].basis == Basis(
+        NO_SECRETS.redact("the model gave no response"), stop="no_response"
+    )
+    assert document(run, 1) == {
+        "seq": 1,
+        "misses": ["not unanimous", "no match"],
+        "problems": [],
+        "script": None,
+        "basis": {
+            "said": "the model gave no response",
+            "model_reported": None,
+            "stop": "no_response",
+        },
+    }
+
+
+def test_a_refused_repairs_account_is_not_kept(tmp_path: Path) -> None:
+    def offer(drift: Drift) -> Offer:
+        said = drift.session.redactor.redact("a bound element")
+        return Offer(rebound(drift.script, semantic="another meaning"), Basis(said))
+
+    run = repairing(tmp_path, offer)
+
+    [repaired] = run.result.repairs
+    assert (bool(repaired.problems), repaired.basis) == (True, None)
+    assert "basis" not in cast(dict[str, object], document(run, 1))
+
+
+def test_a_repair_reads_whether_the_run_was_interrupted(tmp_path: Path) -> None:
+    seen: list[bool] = []
+
+    def offer(drift: Drift) -> CompiledScript:
+        seen.append(drift.interrupted())
+        return drift.script
+
+    repairing(tmp_path, offer)
+
+    assert seen == [False]
 
 
 def test_the_patched_script_is_recorded_and_the_committed_one_is_unchanged(

@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from aqa_core.compiled import (
     ByRole,
@@ -100,18 +100,48 @@ class Drift:
     """Where a replay paused, for its repair: a deep copy of what drifted;
     each locator's miss; a deep copy of the script in use, the committed one
     or an earlier repair's, so an edit to either reaches nothing replay holds;
-    and the live session, which the repair observes through and dispatches
-    nothing with."""
+    the live session, which the repair observes through and dispatches nothing
+    with; and whether something has interrupted the run by now."""
 
     at: At
     misses: tuple[Miss, ...]
     script: CompiledScript
     session: BrowserSession
+    interrupted: Callable[[], bool]
 
 
-# What a replay hands a drift to: the whole script to go on with. Returning
-# the script it was handed gives up, and what drifted stays drifted.
-type Repair = Callable[[Drift], Awaitable[CompiledScript]]
+@dataclass(frozen=True)
+class ModelReported:
+    """What a model said of its own pick: not calibrated, and never what
+    decides a verdict (CONTEXT.md, "Verdict")."""
+
+    confidence: float
+    rationale: Redacted
+
+
+@dataclass(frozen=True)
+class Basis:
+    """A repair's account of what it offers, each text scanned by the repair:
+    why it gave up, or what it bound; what its model said of that, if a model
+    picked it; and a stop of the whole run it hit, if any."""
+
+    said: Redacted
+    model_reported: ModelReported | None = None
+    stop: Literal["no_response", "record_error"] | None = None
+
+
+@dataclass(frozen=True)
+class Offer:
+    """What a repair offers for a drift: the whole script to go on with, and
+    its account of it. The script it was handed gives up, and what drifted
+    stays drifted."""
+
+    script: CompiledScript
+    basis: Basis | None = None
+
+
+# What a replay hands a drift to.
+type Repair = Callable[[Drift], Awaitable[Offer]]
 
 
 @dataclass(frozen=True)
@@ -120,12 +150,14 @@ class Repaired:
     drifted and its misses; why replay refused the script offered, each
     problem scanned, none when it was taken; and the script the run went on
     with, as replay parsed it, None when refused. A repair that offers the
-    script it was handed gives up: neither problems nor a script."""
+    script it was handed gives up: neither problems nor a script. `basis` is
+    the repair's account of what replay took, or of why it gave up."""
 
     at: At
     misses: tuple[Miss, ...]
     problems: tuple[Redacted, ...]
     script: CompiledScript | None
+    basis: Basis | None = None
 
 
 @dataclass(frozen=True)
@@ -133,7 +165,8 @@ class Handing:
     """One run's handoffs to its repair: the repair; `committed`, replay's
     own copy of the script it was given, which nothing handed to a repair
     holds, since the session holds its browser settings; what the checks and
-    the record need; and each handoff so far, in order."""
+    the record need; whether something interrupted the run; and each handoff
+    so far, in order."""
 
     repair: Repair
     committed: CompiledScript
@@ -141,6 +174,7 @@ class Handing:
     config: ProjectConfig
     spec: Spec
     session: BrowserSession
+    interrupted: Callable[[], bool]
     repaired: list[Repaired] = field(default_factory=list)
 
     def handed(self, at: At) -> bool:
@@ -168,7 +202,13 @@ class Handing:
             repaired = self._refused(at, misses, [problem])
         else:
             offered = await self.repair(
-                Drift(deepcopy(at), misses, in_use.model_copy(deep=True), self.session)
+                Drift(
+                    deepcopy(at),
+                    misses,
+                    in_use.model_copy(deep=True),
+                    self.session,
+                    self.interrupted,
+                )
             )
             repaired = await self._checked(at, misses, offered, in_use, ran)
         self.repaired.append(repaired)
@@ -178,7 +218,7 @@ class Handing:
         self,
         at: At,
         misses: tuple[Miss, ...],
-        offered: CompiledScript,
+        offered: Offer,
         in_use: CompiledScript,
         ran: Sequence[Step],
     ) -> Repaired:
@@ -206,13 +246,13 @@ class Handing:
         try:
             # A field of a type `model_copy` let through makes the serializer
             # warn, quoting its value: raised here, and its text never kept.
-            text = offered.model_dump_json(warnings="error")
+            text = offered.script.model_dump_json(warnings="error")
             # Before any problem names a part of it: a validator's pointer
             # escapes `/` and `~` (RFC 6901), a spelling no scan finds.
             clean(text)
             patched = parse_compiled(text, self.config, source=Path(name))
             if patched.model_dump(mode="json") == in_use.model_dump(mode="json"):
-                gave_up = Repaired(at, misses, (), None)
+                gave_up = Repaired(at, misses, (), None, offered.basis)
                 record.write(name, _repair_record(gave_up), check=clean)
                 return gave_up
             problems = await asyncio.to_thread(
@@ -222,7 +262,7 @@ class Handing:
                 problems = _ran_problems(patched, in_use, ran, at)
             if not problems:
                 accepted(patched, self.spec)
-                taken = Repaired(at, misses, (), patched)
+                taken = Repaired(at, misses, (), patched, offered.basis)
                 record.write(name, _repair_record(taken), check=clean)
                 return taken
         except PydanticSerializationError:
@@ -407,7 +447,7 @@ def _ran_problems(
 
 
 def _repair_record(repaired: Repaired) -> dict[str, object]:
-    at, script = repaired.at, repaired.script
+    at, script, basis = repaired.at, repaired.script, repaired.basis
     subject = (
         {"seq": at.step.seq} if isinstance(at, StepAt) else {"assertion": at.check.id}
     )
@@ -418,4 +458,16 @@ def _repair_record(repaired: Repaired) -> dict[str, object]:
         "script": None
         if script is None
         else script.model_dump(mode="json", exclude_none=True),
+        **({} if basis is None else {"basis": _basis_record(basis)}),
+    }
+
+
+def _basis_record(basis: Basis) -> dict[str, object]:
+    reported = basis.model_reported
+    return {
+        "said": basis.said,
+        "model_reported": None
+        if reported is None
+        else {"confidence": reported.confidence, "rationale": reported.rationale},
+        "stop": basis.stop,
     }
