@@ -6,8 +6,14 @@ from typing import Any
 
 import pytest
 from aqa_core import text
-from aqa_core.compiled import CompiledScript
-from aqa_core.heal_patch import heal_patch_problems
+from aqa_core.compiled import ByCss, ByTestId, CompiledScript, TextInTarget
+from aqa_core.heal_patch import (
+    blob_sha,
+    heal_patch_problems,
+    json_patch,
+    literal_claim_spelled,
+    proposal_id,
+)
 from aqa_core.project import parse_compiled
 
 from packages.core.tests.test_compiled import data_models_example
@@ -629,3 +635,105 @@ def test_a_heal_changes_nothing_outside_targets_and_steps(
     assert heal(change) == [
         f"/{field}: a heal changes nothing but target locators and inserted steps"
     ]
+
+
+def applied(document: dict[str, Any], patch: list[dict[str, Any]]) -> dict[str, Any]:
+    """`document` with each RFC 6902 `replace` of `patch` applied, as a person's
+    tool would, knowing nothing of how the patch was made."""
+    for change in patch:
+        assert change["op"] == "replace"
+        *parents, last = change["path"].removeprefix("/").split("/")
+        at = document
+        for token in parents:
+            at = at[token.replace("~1", "/").replace("~0", "~")]
+        at[last.replace("~1", "/").replace("~0", "~")] = change["value"]
+    return document
+
+
+def rebinds_email_and_a_named_target(data: dict[str, Any]) -> None:
+    data["targets"]["a/b~c"] = {
+        "semantic": "a target whose name needs escaping",
+        "locators": [{"css": "#b"}],
+    }
+    data["targets"]["email_input"]["locators"] = [
+        {"css": "input", "scope": {"css": "#checkout"}}
+    ]
+
+
+def test_json_patch_replaces_each_rebound_targets_locators() -> None:
+    def named(data: dict[str, Any]) -> None:
+        data["targets"]["a/b~c"] = {
+            "semantic": "a target whose name needs escaping",
+            "locators": [{"css": "#a"}],
+        }
+
+    committed = script(named)
+    final = script(rebinds_email_and_a_named_target)
+
+    patch = json_patch(committed, final)
+
+    assert patch == [
+        {
+            "op": "replace",
+            "path": "/targets/email_input/locators",
+            "value": [{"css": "input", "scope": {"css": "#checkout"}}],
+        },
+        {
+            "op": "replace",
+            "path": "/targets/a~1b~0c/locators",
+            "value": [{"css": "#b"}],
+        },
+    ]
+    assert applied(committed.model_dump(mode="json", exclude_none=True), patch) == (
+        final.model_dump(mode="json", exclude_none=True)
+    )
+
+
+def test_json_patch_of_a_script_with_its_own_locators_is_empty() -> None:
+    assert json_patch(script(unchanged), script(unchanged)) == []
+
+
+def test_blob_sha_is_gits_for_the_bytes_as_they_are() -> None:
+    # `printf 'hello\\n' | git hash-object --stdin`
+    assert blob_sha(b"hello\n") == "ce013625030ba8dba906f756967f9e9ca394464a"
+
+
+def test_proposal_id_is_ah_and_12_hex_of_its_content() -> None:
+    patch: list[dict[str, Any]] = [
+        {"op": "replace", "path": "/targets/toggle/locators", "value": [{"css": "#t"}]}
+    ]
+
+    # The first 12 hex of the sha256 of the sorted, compact JSON of
+    # {"base": "abc123", "patch": ..., "spec_id": "order"}.
+    assert proposal_id("order", "abc123", patch) == "ah_d2ef532da612"
+    assert proposal_id("order", "abc124", patch) != "ah_d2ef532da612"
+    assert proposal_id("other", "abc123", patch) != "ah_d2ef532da612"
+    assert proposal_id("order", "abc123", []) != "ah_d2ef532da612"
+
+
+CLAIM = TextInTarget(
+    id="a1", expect_index=0, check="text_in_target", target="t", text="ships on Monday"
+)
+PATTERN = TextInTarget(
+    id="a2", expect_index=0, check="text_in_target", target="t", pattern="Monday"
+)
+
+
+@pytest.mark.parametrize(
+    ("locator", "spelled"),
+    [
+        (ByTestId(testid="ships-on-monday"), False),
+        (ByCss(css='[title="ships on Monday"]'), True),
+        (ByTestId(testid="ships on Monday"), True),
+        (ByCss(css="p", scope=ByTestId(testid="ships on Monday")), True),
+        (ByTestId(testid="summary"), False),
+    ],
+)
+def test_a_locator_that_spells_a_literal_claim_is_found_at_any_level(
+    locator: ByTestId | ByCss, spelled: bool
+) -> None:
+    assert literal_claim_spelled(locator, [CLAIM]) is spelled
+
+
+def test_a_pattern_claim_is_left_to_the_validators_bounded_search() -> None:
+    assert literal_claim_spelled(ByTestId(testid="Monday"), [PATTERN]) is False

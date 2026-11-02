@@ -1,8 +1,11 @@
 """What a heal patch may change in a compiled script (DATA_MODEL §7, #19): a
 heal rebinds targets' locators and inserts replay-safe steps, and changes
 nothing else. Product code owns these rules; the benchmark's rebindings pass
-through them too."""
+through them too. A proposal's parts are here as well: its patch, the blob SHA
+of the file it applies to, and its id (ADR-0024's #243 and #244 amendments)."""
 
+import hashlib
+import json
 from collections.abc import Iterator, Sequence
 
 from aqa_core.compiled import (
@@ -255,3 +258,58 @@ def heal_patch_problems(script: CompiledScript, healed: CompiledScript) -> list[
     problems.extend(_existing_steps(script.steps, healed.steps))
     problems.extend(_inserted_steps(script.steps, healed.steps))
     return problems
+
+
+def json_patch(
+    committed: CompiledScript, final: CompiledScript
+) -> list[dict[str, object]]:
+    """The RFC 6902 patch from `committed` to `final`: one `replace` of a
+    target's locators for each target whose locators differ, in `committed`'s
+    order, and nothing else, since a heal changes nothing else that has a
+    producer until #246. `final` must hold every target of `committed`, as a
+    script the validator took does."""
+    return [
+        {
+            "op": "replace",
+            "path": f"/targets/{pointer(name)}/locators",
+            "value": final.targets[name].model_dump(mode="json", exclude_none=True)[
+                "locators"
+            ],
+        }
+        for name, target in committed.targets.items()
+        if final.targets[name].locators != target.locators
+    ]
+
+
+def blob_sha(raw: bytes) -> str:
+    """Git's blob SHA of `raw`, as `git hash-object --no-filters` gives it
+    (ADR-0024's #244 amendment): over the bytes as they are, a byte order mark
+    included, and not for security."""
+    header = b"blob %d\0" % len(raw)
+    return hashlib.sha1(header + raw, usedforsecurity=False).hexdigest()
+
+
+def proposal_id(spec_id: str, base: str, patch: Sequence[dict[str, object]]) -> str:
+    """A heal proposal's id, derived from its content, so the same patch on the
+    same base gets the same one: `ah_` and the first 12 hex of the sha256 of
+    its sorted, compact JSON. 15 characters fit GitHub's 20-character action
+    identifier (API.md §6)."""
+    content = {"base": base, "patch": list(patch), "spec_id": spec_id}
+    canonical = json.dumps(content, sort_keys=True, separators=(",", ":"))
+    return f"ah_{hashlib.sha256(canonical.encode()).hexdigest()[:12]}"
+
+
+def literal_claim_spelled(locator: Locator, claims: Sequence[TextInTarget]) -> bool:
+    """Whether a string `locator` finds its element by, at any level, meets a
+    literal text claim as its check would: a locator the validator would
+    refuse, so a healer's generation drops it, and the next of its kind is
+    tried. A pattern claim is left to the validator, whose bounded search
+    runs off the loop (#261)."""
+    return any(
+        claim.matches(string)
+        for _, level in locator_levels("", locator, scope_key="/scope")
+        for _, strings in _strings(level)
+        for string in strings
+        for claim in claims
+        if claim.pattern is None
+    )
