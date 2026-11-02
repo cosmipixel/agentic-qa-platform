@@ -2,9 +2,10 @@
 committed script replayed with every locator, a drift healed on a scripted model
 into a proposal a person applies, and the exit code rolled up across specs. Real
 Chromium against #240's drift pages. `test_heal*.py` hold the heal's rules and
-`test_replay_result.py` the verdicts'; these hold the command."""
+`test_replay_result_heals.py` the verdicts'; these hold the command."""
 
 import json
+import re
 import shutil
 import subprocess
 from collections.abc import Callable, Iterator, Sequence
@@ -21,6 +22,7 @@ from aqa_cli.main import app as aqa
 from aqa_core.compiled import CompiledScript
 from aqa_core.project import load_project
 from aqa_runner.publication import published_text
+from aqa_runner.strict_replay import Replayed
 from playwright._impl._browser_type import BrowserType
 
 from packages.runner.tests.drift_fixtures import (
@@ -28,11 +30,13 @@ from packages.runner.tests.drift_fixtures import (
     DETAILS,
     IN_VIEW,
     SHIPPING,
+    SUMMARY,
+    TOGGLE,
     order_spec,
     page,
     serving,
 )
-from packages.runner.tests.executor_fixtures import App, for_spec
+from packages.runner.tests.executor_fixtures import App, compiled, for_spec
 from packages.runner.tests.explore_graph_fixtures import (
     NO_RESPONSE,
     Move,
@@ -53,6 +57,15 @@ KEY = "fake-key-for-aqa-run-tests"
 GIT = shutil.which("git") or "git"
 CONFIG = "budgets: { resolve_seconds: 2 }\n"
 TOGGLE_MEANING = "the button that shows the order's details"
+# The toggle's drift, then the summary's, each its own repair.
+THE_SUMMARY_DRIFTS_TOO = compiled(
+    [{"seq": 1, "action": "click", "target": "toggle", "side_effect": False}],
+    targets={
+        "toggle": TOGGLE,
+        "summary": {**SUMMARY, "locators": [{"css": "#summary"}, {"css": "#gone"}]},
+    },
+    assertions=DETAILS.model_dump(mode="json", exclude_none=True)["assertions"],
+)
 
 
 @dataclass(frozen=True)
@@ -347,6 +360,91 @@ def test_a_heal_out_of_budget_is_inconclusive_and_exits_3(
     assert document["heal_proposal"] is None
     assert "the turn budget (1) ran out" in result.stderr
     cited_paths_all_exist(spec)
+
+
+def test_heal_model_usd_below_one_response_stops_the_heal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = "budgets: { resolve_seconds: 2, heal_model_usd: 0.001 }\n"
+    spec = order_at(tmp_path / "qa", config=config)
+
+    with serving(MOVED) as app:
+        result = run(
+            monkeypatch,
+            [str(spec), "--url", app.origin],
+            Scripted(rebinding("button", "Show details")),
+        )
+
+    assert result.exit_code == 3, result.output
+    assert replay_json(spec)["heal_proposal"] is None
+    assert "the spend budget ran out on this turn, so its call didn't run" in (
+        result.stderr
+    )
+
+
+def test_a_run_whose_record_cant_be_made_exits_15_and_says_it_was_a_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`aqa run` prints no document yet, so what it holds is read where it ends."""
+    spec = order_at(tmp_path / "qa")
+    (spec.parent / ".aqa").write_text("not a directory\n")
+    ended: list[Replayed] = []
+
+    def keeping(*args: Any, **kwargs: Any) -> list[Replayed]:
+        ended.extend(common.replayed_runs(*args, **kwargs))
+        return ended
+
+    monkeypatch.setattr(run_module, "replayed_runs", keeping)
+
+    with serving(ORDER) as app:
+        result = run(monkeypatch, [str(spec), "--url", app.origin])
+
+    assert result.exit_code == 15, result.output
+    assert re.fullmatch(
+        r"record_error order: \d+\.\ds, \$0\n"
+        "  the run record could not be created; nothing was replayed\n",
+        result.stderr,
+    )
+    assert app.seen == []
+    assert ended[0].document == {
+        "schema_version": 1,
+        "run_id": None,
+        "spec_id": "order",
+        "mode": "run",
+        "outcome": "record_error",
+        "exit_code": 15,
+        "withheld": False,
+        "error_code": None,
+        "reasons": ["the run record could not be created; nothing was replayed"],
+        "non_resumable": [],
+        "infrastructure_events": {"count": 0, "events": []},
+        "verdicts": [],
+        "heal_proposal": None,
+    }
+
+
+def test_two_repairs_on_two_targets_each_say_what_they_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = order_at(tmp_path / "qa", THE_SUMMARY_DRIFTS_TOO)
+
+    with serving(MOVED) as app:
+        result = run(
+            monkeypatch,
+            [str(spec), "--url", app.origin],
+            Scripted(
+                rebinding("button", "Show details"),
+                rebinding("paragraph", "Order 42 ships on Monday"),
+            ),
+        )
+
+    assert result.exit_code == 7, result.output
+    assert (
+        f'  toggle ({TOGGLE_MEANING}): bound button "Show details"\n' in result.stderr
+    )
+    assert (
+        "  summary (the order's shipping summary): bound paragraph\n" in result.stderr
+    )
 
 
 def test_a_model_that_gives_no_response_exits_11(
