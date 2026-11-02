@@ -6,7 +6,7 @@ the rules by hand; these hold what a real heal leaves."""
 from pathlib import Path
 from typing import Any
 
-from packages.runner.tests.drift_fixtures import BUTTON, SUMMARY
+from packages.runner.tests.drift_fixtures import BUTTON, SUMMARY, TOGGLE
 from packages.runner.tests.executor_fixtures import compiled
 from packages.runner.tests.explore_graph_fixtures import NO_RESPONSE
 from packages.runner.tests.heal_fixtures import (
@@ -93,6 +93,34 @@ def test_a_healed_step_is_drift_consistent_and_proposes_its_patch(
         }
     ]
     assert paths_cited(run) == []
+
+
+def test_a_check_with_a_healed_steps_label_leaves_the_step_its_proposal(
+    tmp_path: Path,
+) -> None:
+    """A check's id can be any string. This one passes, on a target no heal
+    touched, and step 1 is still a model's pick that a person must accept."""
+    script = compiled(
+        [{"seq": 1, "action": "click", "target": "toggle", "side_effect": False}],
+        targets={"toggle": TOGGLE, "summary": SUMMARY},
+        assertions=[{**SEEN_CHECK, "id": "step 1"}],
+    )
+
+    run = healed(tmp_path, SHOW, script=script)
+
+    written = run.document
+    assert (written["outcome"], written["exit_code"]) == ("drift_consistent", 7)
+    assert written["heal_proposal"]["patch"] == [
+        {
+            "op": "replace",
+            "path": "/targets/toggle/locators",
+            "value": THE_TOGGLE_MOVED,
+        }
+    ]
+    assert run.verdict("step", 1)["verdict"] == "drift_consistent"
+    assert run.verdict("step", 1)["heal"]["repair"] == "repairs/1.json"
+    assert run.verdict("assertion", "step 1")["verdict"] == "pass"
+    assert run.verdict("assertion", "step 1")["heal"] is None
 
 
 def test_a_healed_assertion_target_is_drift_consistent_and_cites_its_record(

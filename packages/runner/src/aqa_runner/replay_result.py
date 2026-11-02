@@ -254,12 +254,28 @@ def _non_resumable(end: ReplayEnd) -> list[int]:
 
 
 @dataclass(frozen=True)
-class _Judged:
-    """One verdict: what the run's reasons call its subject (`step 1`,
-    `a2`, `invariant js_exceptions`), the verdict, its document entry, and
-    each locator's miss when its target drifted, else None."""
+class _Subject:
+    """What one verdict is on, by its kind and its name: a step's seq, a check's
+    id or an invariant's name. A check's id can be any string, `step 1` too, so
+    only the two together say which subject it is."""
 
-    label: str
+    kind: Literal["step", "assertion", "invariant"]
+    name: int | str
+
+    @property
+    def label(self) -> str:
+        """What the run's reasons call it: `step 1`, `a2`, `invariant http_5xx`."""
+        return (
+            str(self.name) if self.kind == "assertion" else f"{self.kind} {self.name}"
+        )
+
+
+@dataclass(frozen=True)
+class _Judged:
+    """One verdict: its subject, the verdict, its document entry, and each
+    locator's miss when its target drifted, else None."""
+
+    subject: _Subject
     verdict: Verdict
     entry: dict[str, object]
     drift: tuple[Miss, ...] | None = None
@@ -326,25 +342,23 @@ class _Judging:
     violated_at: int
 
     def step(self, step: StepResult) -> _Judged:
-        located = {"step": step.seq, **_located(step.locator_index, step.misses)}
         judged = self._judged(
-            f"step {step.seq}", located, _step_verdict(step), step.seq
+            _Subject("step", step.seq),
+            _located(step.locator_index, step.misses),
+            _step_verdict(step),
+            step.seq,
         )
         return replace(judged, drift=step.misses if step.outcome == "drifted" else None)
 
     def assertion(
         self, result: AssertionResult, check: Assertion, expectation: str
     ) -> _Judged:
-        located = {
-            "assertion": result.id,
-            **_located(result.locator_index, result.misses),
-        }
         category: Category = (
             "visual" if isinstance(check, VisibleUnoccluded) else "functional"
         )
         judged = self._judged(
-            result.id,
-            located,
+            _Subject("assertion", result.id),
+            _located(result.locator_index, result.misses),
             _assertion_verdict(result),
             self.last,
             about=(category, expectation),
@@ -356,8 +370,8 @@ class _Judging:
         name = result.name
         held = result.outcome == "held"
         return self._judged(
-            f"invariant {name}",
-            {"invariant": name},
+            _Subject("invariant", name),
+            {},
             ("pass" if held else "expectation_violated", None),
             self.last if held else self.violated_at,
             about=(_CATEGORIES[name], f"invariant {name} violated"),
@@ -365,16 +379,17 @@ class _Judging:
 
     def _judged(
         self,
-        label: str,
-        named: dict[str, object],
+        subject: _Subject,
+        located: dict[str, object],
         judgement: tuple[Verdict, str | None],
         evidence: int,
         *,
         about: tuple[Category, str] | None = None,
     ) -> _Judged:
-        """The verdict on `named` and its reason, citing step `evidence`'s
-        evidence, which no screenshot is part of until #251 (DATA_MODEL §7).
-        A violation's finding is `about` its category and title."""
+        """The verdict on `subject`, where it was `located`, and its reason,
+        citing step `evidence`'s evidence, which no screenshot is part of until
+        #251 (DATA_MODEL §7). A violation's finding is `about` its category and
+        title."""
         verdict, reason = judgement
         scan = self.redactor.redact
         finding = None
@@ -386,10 +401,11 @@ class _Judging:
                 "repro_steps": self.ran,
             }
         return _Judged(
-            label,
+            subject,
             verdict,
             {
-                **named,
+                subject.kind: subject.name,
+                **located,
                 "verdict": verdict,
                 "reason": None if reason is None else scan(reason),
                 "evidence": {"path": f"evidence/{evidence}", "screenshot": None},
@@ -436,26 +452,26 @@ class _Healed:
     amendment). A subject is on the rebound set when it is a step that ran
     through a target whose locators differ between the committed script and the
     final one, or an assertion of any kind on such a target. `by_subject` is each
-    repair by the label of what it was handed, `first` each target's first repair
-    to change it, `targets` what each subject's label reads, and `untroubled`
-    says nothing stopped, blocked or left unresolved the run."""
+    repair by what it was handed, `first` each target's first repair to change
+    it, `targets` what each subject reads, and `untroubled` says nothing stopped,
+    blocked or left unresolved the run."""
 
     redactor: Redactor
     rebound: frozenset[str]
-    by_subject: Mapping[str, Repaired]
+    by_subject: Mapping[_Subject, Repaired]
     first: Mapping[str, Repaired]
-    targets: Mapping[str, str]
+    targets: Mapping[_Subject, str]
     untroubled: bool
 
     @classmethod
     def of(cls, end: ReplayEnd, result: RunResult) -> _Healed:
         final = final_script(end.script, result.repairs)
         targets = {
-            f"step {step.seq}": step.target
+            _Subject("step", step.seq): step.target
             for step in final.steps
             if isinstance(step, Click | Fill | FillSecret | Select)
         } | {
-            check.id: check.target
+            _Subject("assertion", check.id): check.target
             for check in end.script.assertions
             if isinstance(check, TextInTarget | NotVisible | VisibleUnoccluded)
         }
@@ -489,10 +505,10 @@ class _Healed:
         subject on the rebound set cites the repair that first changed its
         target. There a completed step in a run that didn't pass is `inconclusive`
         (Q12), and an assertion keeps its own verdict (#245)."""
-        target = self.targets.get(judged.label)
+        target = self.targets.get(judged.subject)
         if judged.drift is not None:
             first = None if target is None else self.first.get(target)
-            repair = self.by_subject.get(judged.label) or first
+            repair = self.by_subject.get(judged.subject) or first
             said = _drift(judged.drift, _why_drifted(repair))
             cited = None if repair is None else _cited(repair, bound=False)
             return judged.ruled("inconclusive", self.redactor.redact(said), cited)
@@ -501,17 +517,19 @@ class _Healed:
         cited = _cited(self.first[target], bound=True)
         if passed:
             return judged.ruled("drift_consistent", None, cited)
-        if judged.label.startswith("step ") and judged.verdict == "pass":
+        if judged.subject.kind == "step" and judged.verdict == "pass":
             return judged.ruled(
                 "inconclusive", self.redactor.redact(_NOT_PASSED), cited
             )
         return judged.cited(cited)
 
 
-def _subject(repaired: Repaired) -> str:
-    """The label of what `repaired` was handed."""
+def _subject(repaired: Repaired) -> _Subject:
+    """What `repaired` was handed."""
     at = repaired.at
-    return f"step {at.step.seq}" if isinstance(at, StepAt) else at.check.id
+    if isinstance(at, StepAt):
+        return _Subject("step", at.step.seq)
+    return _Subject("assertion", at.check.id)
 
 
 def _why_drifted(repair: Repaired | None) -> str:
@@ -555,4 +573,4 @@ def _reasons(end: ReplayEnd, judged: list[_Judged]) -> Iterator[Redacted]:
         if verdict.verdict not in ("pass", "drift_consistent"):
             reason = verdict.entry["reason"]
             said = "" if reason is None else f", {reason}"
-            yield scan(f"{verdict.label}: {verdict.verdict}{said}")
+            yield scan(f"{verdict.subject.label}: {verdict.verdict}{said}")
