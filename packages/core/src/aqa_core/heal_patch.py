@@ -130,7 +130,7 @@ def _written(
                 yield f"{where}/{field}: {reason}"
 
 
-def _claims(script: CompiledScript) -> dict[str, list[TextInTarget]]:
+def text_claims(script: CompiledScript) -> dict[str, list[TextInTarget]]:
     """Each meaning's text checks. A meaning's text is checked when any
     target of it is, as the generator reads it, so each claim holds for
     every target of it."""
@@ -150,7 +150,7 @@ def _target_problems(script: CompiledScript, healed: CompiledScript) -> Iterator
         for check in script.assertions
         if isinstance(check, TextInTarget | NotVisible | VisibleUnoccluded)
     }
-    claims = _claims(script)
+    claims = text_claims(script)
     for name in healed.targets:
         if name not in script.targets:
             yield f"/targets/{pointer(name)}: a heal adds no target"

@@ -555,7 +555,9 @@ async def _keep_with_evidence(
     steps.append(step)
     budget = run.setup.config.budgets.resolve_seconds
     snapshot = await _observed(session, budget)
-    await capture_evidence(run.setup.record, session, step.seq, step.window, snapshot)
+    await capture_evidence(
+        run.setup.record, session, f"evidence/{step.seq}", step.window, snapshot
+    )
     return Evidence(step.seq, None if snapshot is None else str(snapshot))
 
 
