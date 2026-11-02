@@ -5,6 +5,7 @@ the compiled script. Nothing here commits it: the person's own commit does that.
 import asyncio
 import math
 import re
+from dataclasses import replace
 from pathlib import Path
 from typing import Annotated, Final
 
@@ -26,6 +27,10 @@ _UNREAD: Final = (
 _STALE: Final = (
     "the compiled script changed since this proposal was made, so nothing was "
     "applied: run aqa run again"
+)
+_LINKED: Final = (
+    "a link, which could lead into another checkout: run this inside the project you "
+    "mean"
 )
 _REFORMATTED: Final = (
     "  the compiled script wasn't in the form aqa writes, so its formatting changed too"
@@ -69,10 +74,15 @@ def heal(
 def _spec_root_above(directory: Path) -> Path:
     """The spec root a command given no spec path runs under: from `directory` up,
     at each level `qa/`, where `aqa init` puts one, and then the level itself, so a
-    repository's own `config.yaml` doesn't win over its `qa/`."""
+    repository's own `config.yaml` doesn't win over its `qa/`. No person named this
+    root, and a repository can commit `qa` as a link into another checkout, where the
+    write would land, so a link is refused before anything behind it is read. A level
+    holds no link: the working directory is the operating system's physical path."""
     for level in (directory, *directory.parents):
         for root in (level / "qa", level):
             if (root / "config.yaml").is_file():
+                if root.is_symlink():
+                    raise SpecError([f"{root}: {_LINKED}"])
                 return root
     raise SpecError([f"{directory}: no config.yaml in it, in its qa/ or above it"])
 
@@ -109,7 +119,14 @@ def _apply(proposal: str) -> None:
         stop("spec_error", proposal, _NOTHING, error.problems)
     try:
         # No minutes budget bounds this: `LOCK_SECONDS` bounds the wait.
-        asyncio.run(publish_text(at, patched.script, patched.text, deadline=math.inf))
+        asyncio.run(
+            publish_text(
+                replace(at, own_root=True),
+                patched.script,
+                patched.text,
+                deadline=math.inf,
+            )
+        )
     except PublishError as error:
         stop("gave_up", proposal, _NOTHING, (str(error),))
     except PublishWriteError as error:
