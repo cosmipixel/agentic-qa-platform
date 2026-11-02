@@ -396,7 +396,11 @@ class Attempt:
         step, self._unseen = self._unseen, None
         if step is not None:
             await capture_evidence(
-                self.record, self.session, step.seq, step.window, observation
+                self.record,
+                self.session,
+                f"evidence/{step.seq}",
+                step.window,
+                observation,
             )
 
     async def describe(self, call: DescribeParts) -> Described:

@@ -135,7 +135,7 @@ def test_console_entries_and_the_network_log_show_the_marker(
                     and not window.open
                 )
             )
-            await capture_evidence(record, session, 1, window, None)
+            await capture_evidence(record, session, "evidence/1", window, None)
             logged = session.console_log(window)
             return (
                 [entry.text for entry in session.console_log(loaded).kept],
@@ -185,8 +185,10 @@ def test_a_run_that_binds_a_secret_saves_no_url_method_or_console_text(
             )
             unscanned = RunRecord(record.run_id, record.path)
             with pytest.raises(ValueError, match="redactor"):
-                await capture_evidence(unscanned, session, 1, window, None)
-            await capture_evidence(part, session, 1, window, await session.snapshot())
+                await capture_evidence(unscanned, session, "evidence/1", window, None)
+            await capture_evidence(
+                part, session, "evidence/1", window, await session.snapshot()
+            )
 
     asyncio.run(scenario())
 
@@ -220,13 +222,13 @@ def test_capturing_evidence_changes_no_observation_a_caller_takes(
             window = await session.navigate(f"{app.origin}/page/start")
             seen = [await session.snapshot()]
             if capture:
-                await capture_evidence(record, session, 0, window, seen[-1])
+                await capture_evidence(record, session, "evidence/0", window, seen[-1])
             link = await session.locate(ref_for(seen[-1], "link", "Form"))
             window = await session.click(link)
             await session.settle(window)
             seen.append(await session.snapshot())
             if capture:
-                await capture_evidence(record, session, 1, window, None)
+                await capture_evidence(record, session, "evidence/1", window, None)
             await session.locate(ref_for(seen[-1], "textbox", "Name"))
             # The control: a snapshot of the same page numbers its refs anew.
             renumbered = await session.snapshot() != seen[-1]
@@ -260,7 +262,7 @@ def test_an_evidence_read_refuses_like_any_other_but_records_nothing(
                 unrecorded = session.policy_events.total
                 with pytest.raises(PolicyEventError) as loud:
                     await session.snapshot()
-                await capture_evidence(record, session, 1, window, None)
+                await capture_evidence(record, session, "evidence/1", window, None)
                 return (
                     pruned,
                     quiet.value,

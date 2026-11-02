@@ -48,6 +48,9 @@ _OTHER_ROLE: Final = (
     "a repair rebound this step's target to an element without its committed "
     "role, so the step did not run"
 )
+_OTHER_ROLE_CHECKED: Final = (
+    "a repair may bind this check's target only to an element with its committed role"
+)
 _TAKES_NO_TEXT: Final = (
     "a repair rebound this step's target to an element that takes no text, so "
     "the step did not run"
@@ -76,6 +79,10 @@ class StepAt:
         """What its record is named by: `repairs/<seq>.json`."""
         return str(self.step.seq)
 
+    @property
+    def target(self) -> str:
+        return self.step.target
+
 
 @dataclass(frozen=True)
 class AssertionAt:
@@ -89,6 +96,10 @@ class AssertionAt:
         """What its record is named by, since a check's id may hold `/`:
         `repairs/assertion-<index>.json`."""
         return f"assertion-{self.index}"
+
+    @property
+    def target(self) -> str:
+        return self.check.target
 
 
 # Where a replay paused for its repair.
@@ -123,11 +134,13 @@ class ModelReported:
 class Basis:
     """A repair's account of what it offers, each text scanned by the repair:
     why it gave up, or what it bound; what its model said of that, if a model
-    picked it; and a stop of the whole run it hit, if any."""
+    picked it; a stop of the whole run it hit, if any; and the folder of the
+    run record its own files are in, if it wrote any."""
 
     said: Redacted
     model_reported: ModelReported | None = None
     stop: Literal["no_response", "record_error"] | None = None
+    record: str | None = None
 
 
 @dataclass(frozen=True)
@@ -193,10 +206,9 @@ class Handing:
         repair raises leaves as any failure of the run does. A target a step in
         `ran` acted through goes to no repair and is recorded as refused: no
         offer could change it (`_ran_problems`), so nothing is spent asking."""
-        target = at.step.target if isinstance(at, StepAt) else at.check.target
-        if target in _acted_through(ran):
+        if at.target in _acted_through(ran):
             problem = (
-                f"/targets/{pointer(target)}: a step that already ran acted "
+                f"/targets/{pointer(at.target)}: a step that already ran acted "
                 "through this target, so it goes to no repair"
             )
             repaired = self._refused(at, misses, [problem])
@@ -291,7 +303,7 @@ class Handing:
 
 async def rebind_refusal(
     session: BrowserSession,
-    step: Targeted,
+    step: Targeted | None,
     element: ElementHandle,
     committed: Target,
     *,
@@ -309,16 +321,17 @@ async def rebind_refusal(
     itself. It keeps a test secret from the wrong element and a repair from
     acting on one the committed locators can't vouch for. A look that raises
     or that the page doesn't answer refuses it too, with a reason from the
-    run's closed vocabulary (`aqa_runner.reasons`) or fixed words."""
+    run's closed vocabulary (`aqa_runner.reasons`) or fixed words. With no
+    `step`, `element` is for a check's target, and only its role is read."""
     redactor = session.redactor
     refused: str | None = None
     try:
         async with session.observing_page() as page:
-            refused = await _cut_off(_refusal(page, step, element, committed), budget)
+            refused = await cut_off(_refusal(page, step, element, committed), budget)
         if refused is None and secret is not None:
             # Safe under `bounded` only because this call lets go of what it
             # holds with `dispose`, which a busy page answers. A hold released
-            # by a read would need `_cut_off`, but `_cut_off` would leave
+            # by a read would need `cut_off`, but `cut_off` would leave
             # `session._turn` held by the abandoned task.
             await bounded(session.secret_refusal(element, secret), budget)
     except (
@@ -336,7 +349,7 @@ async def rebind_refusal(
 
 
 async def _refusal(
-    page: Page, step: Targeted, element: ElementHandle, committed: Target
+    page: Page, step: Targeted | None, element: ElementHandle, committed: Target
 ) -> str | None:
     """The checks that read the page: the element's role, its kind for
     `step`'s action, and the anchor. Each reads the element as it is now: a
@@ -345,7 +358,9 @@ async def _refusal(
         (each.role for each in committed.locators if isinstance(each, ByRole)), None
     )
     if role is not None and not await is_among(page.get_by_role(role), element):
-        return _OTHER_ROLE
+        return _OTHER_ROLE_CHECKED if step is None else _OTHER_ROLE
+    if step is None:
+        return None
     if isinstance(step, Fill | FillSecret) and not await _editable(element):
         return _TAKES_NO_TEXT
     if isinstance(step, Select) and not await is_among(
@@ -383,7 +398,7 @@ async def _found_alone(page: Page, element: ElementHandle, committed: Target) ->
     return False
 
 
-async def _cut_off[T](look: Coroutine[Any, Any, T], budget: float) -> T:
+async def cut_off[T](look: Coroutine[Any, Any, T], budget: float) -> T:
     """`look`'s result, or `UnansweredError` when the page hasn't answered
     within `budget` seconds and `MARGIN_SECONDS` past them. `evaluation.bounded`
     waits for a look it cancels to finish, and a look that holds an element or

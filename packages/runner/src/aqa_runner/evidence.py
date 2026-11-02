@@ -1,6 +1,7 @@
 """Evidence (ADR-0026, Evidence, and its #50 B amendment): what a run keeps
-of each step, under `evidence/<seq>/` in the record it is given. Replay
-(`aqa_runner.executor`) and exploring (#53) both save it here.
+of each step, under `evidence/<seq>/` in the record it is given, and of a heal's
+first look, under `heals/<key>/`. Replay (`aqa_runner.executor`), exploring
+(#53) and heal (`aqa_runner.heal`) all save it here.
 
 - `a11y_snapshot.yaml`: the caller's own scanned snapshot of the page after
   the step, the one a model is shown, so saving it takes no look of its own
@@ -29,20 +30,19 @@ from aqa_runner.settling import ConsoleEntry, NetworkEntry, Window
 async def capture_evidence(
     record: RunRecord,
     session: BrowserSession,
-    seq: int,
+    folder: str,
     window: Window | None,
     snapshot: Redacted | None,
 ) -> None:
-    """Save step `seq`'s evidence in `record`, whose scan must be `session`'s
+    """Save evidence in `folder` of `record`, whose scan must be `session`'s
     (`ValueError` before anything is written). `window` is the step's
-    settle window, None when it has none (a drifted step, or a failed one
-    whose result keeps none); `snapshot` is the caller's first snapshot
-    after the step settled."""
+    settle window, None when it has none (a drifted step, a failed one
+    whose result keeps none, or a heal's look); `snapshot` is the caller's
+    first snapshot after the step settled."""
     if record.redactor is not session.redactor:
         raise ValueError(
             "evidence goes only to a record that scans with its session's redactor"
         )
-    folder = f"evidence/{seq}"
     withheld = not record.redactor.empty
     if snapshot is not None:
         with suppress(RefusedWriteError):
