@@ -1,26 +1,44 @@
-"""What `aqa explore` and `aqa replay` share (API.md §7): resolving a spec,
-writing through one output boundary that fails closed (ADR-0026's #53 P17
-amendment), stopping with an outcome and its exit code, and starting and
-stopping Playwright's driver.
+"""What `aqa explore`, `aqa replay` and `aqa run` share (API.md §7): resolving a
+spec, writing through one output boundary that fails closed (ADR-0026's #53 P17
+amendment), stopping with an outcome and its exit code, starting and stopping
+Playwright's driver, and the runner `replay` and `run` both are.
 
-Everything either command prints goes through `rendered`, which scans the
-whole text with the invocation's test secrets once they are bound; a text
-that still spells one is never written."""
+Everything a command prints goes through `rendered`, which scans the whole text
+with the invocation's test secrets once they are bound; a text that still spells
+one is never written."""
 
 import asyncio
 import contextlib
 import re
-from collections.abc import AsyncIterator, Coroutine, Mapping, Sequence
+import time
+from collections.abc import (
+    AsyncIterator,
+    Callable,
+    Coroutine,
+    Iterable,
+    Mapping,
+    Sequence,
+)
+from functools import partial
 from pathlib import Path
 from typing import Any, Final, Literal, NoReturn
 
 import typer
+from aqa_core.compiled import CompiledScript
 from aqa_core.config import ProjectConfig
-from aqa_core.project import SpecError, load_project, start_origin
+from aqa_core.heal_patch import blob_sha
+from aqa_core.project import SpecError, load_project, read_compiled, start_origin
 from aqa_core.spec import Spec
+from aqa_runner.admission import BoundValueSpelledError, admitted
+from aqa_runner.bound_secrets import BoundSecret, MissingSecretError, SecretLoggedError
+from aqa_runner.locator_generation import register_identity_engine
+from aqa_runner.model_turns import Spending
+from aqa_runner.publication import publication
 from aqa_runner.redaction import NO_SECRETS, Redactor
+from aqa_runner.repairs import Repair
+from aqa_runner.strict_replay import Replayed, StrictRun, strict_replay
 from playwright.async_api import Error as PlaywrightError
-from playwright.async_api import Playwright
+from playwright.async_api import Playwright, async_playwright
 
 # How a command stops a run it never started, or a plan-only run that doesn't
 # plan (ADR-0024's outcomes), and its exit code (API.md §7).
@@ -49,6 +67,11 @@ WITHHELD: Final = (
 # (`PipeTransport.run`), raised as a bare Exception, with no class of its own.
 _CLOSED_EARLY: Final = ("Connection closed while reading from the driver",)
 _NO_DRIVER: Final = "the browser driver couldn't start"
+_NOTHING: Final = "nothing was replayed"
+_MISSING: Final = "no compiled script: explore it first"
+_UNREAD: Final = "the compiled script could not be read, so nothing was replayed"
+_UNLOADED: Final = "the compiled script doesn't load, so nothing was replayed"
+_REFUSED: Final = "replay refuses the compiled script, so nothing was replayed"
 
 # Characters that would move the cursor, recolour the terminal or reorder text
 # when printed: C0 and C1 controls, line and paragraph separators, and every
@@ -202,3 +225,139 @@ async def _driver(starting: asyncio.Task[Playwright]) -> Playwright:
         loop.set_exception_handler(previous)
         for report in held:
             loop.call_exception_handler(report)
+
+
+def admitted_runs(paths: Sequence[Path], url: str | None) -> list[StrictRun]:
+    """Each spec at `paths`, admitted for a replay, before any reset is sent and
+    before Playwright's driver starts, which must inherit no environment a test
+    secret's binding refused (#215), or a stop, scanned with the test secrets
+    the specs before it bound, and its own once admission bound them. The first
+    problem stops the command: 5 for a spec, or for a compiled script missing,
+    that doesn't load or that replay refuses (`admission.admitted`), 15 for one
+    that can't be read, and 12 for test secrets that can't be used."""
+    runs: list[StrictRun] = []
+    for path in paths:
+        scan = scan_of(runs)
+        try:
+            root, spec, config, start = resolve(path, url)
+        except SpecError as error:
+            stop("spec_error", str(path), _NOTHING, error.problems, scan=scan)
+        spec_id = spec.frontmatter.id
+        script, raw = _compiled(root, spec, config, scan)
+        try:
+            _, _, bound, _ = admitted(script, spec, config, start)
+        except BoundValueSpelledError as error:
+            scan = scan_of(runs, error.bound.values())
+            stop("spec_error", spec_id, _REFUSED, error.problems, scan=scan)
+        except SpecError as error:
+            stop("spec_error", spec_id, _REFUSED, error.problems, scan=scan)
+        except MissingSecretError as error:
+            scan = scan_of(runs, error.bound.values())
+            stop("secret_unusable", spec_id, _NOTHING, error.problems, scan=scan)
+        except SecretLoggedError as error:
+            scan = scan_of(runs, error.bound.values())
+            stop("secret_unusable", spec_id, _NOTHING, (str(error),), scan=scan)
+        runs.append(StrictRun(root, spec, config, start, script, bound, blob_sha(raw)))
+    return runs
+
+
+def _compiled(
+    root: Path, spec: Spec, config: ProjectConfig, scan: Redactor
+) -> tuple[CompiledScript, bytes]:
+    """`spec`'s compiled script, read as explore reads it, and the bytes it was
+    read from, or a stop scanned with `scan`: none, a link on the way
+    (`publication`) and one that doesn't load are spec errors, and one that
+    can't be read is 15."""
+    spec_id = spec.frontmatter.id
+    try:
+        at = publication(root, spec)
+    except SpecError as error:
+        stop("spec_error", spec_id, _NOTHING, error.problems, scan=scan)
+    except OSError:
+        stop("record_error", spec_id, _UNREAD, scan=scan)
+    if at.found is None:
+        stop("spec_error", spec_id, _MISSING, scan=scan)
+    try:
+        return read_compiled(at.target, config)
+    except OSError:
+        stop("record_error", spec_id, _UNREAD, scan=scan)
+    except SpecError as error:
+        stop("spec_error", spec_id, _UNLOADED, error.problems, scan=scan)
+
+
+def scan_of(runs: Sequence[StrictRun], more: Iterable[BoundSecret] = ()) -> Redactor:
+    """The scan of every test secret `runs` bind, and `more`."""
+    return Redactor([*(s for run in runs for s in run.bound.values()), *more])
+
+
+def replayed_runs(
+    runs: Sequence[StrictRun],
+    scan: Redactor,
+    *,
+    lines: bool = True,
+    quiet: bool = False,
+    heal: Callable[[StrictRun, Spending], Repair] | None = None,
+) -> list[Replayed]:
+    """Each run, in order, on one Playwright driver, a drift going to the repair
+    `heal` builds for it when given, and, with `lines`, its line as it ends,
+    unless `quiet` and it passed; or a stop (13) when the driver or the egress
+    listener couldn't start."""
+    try:
+        return asyncio.run(_replayed(runs, scan, lines=lines, quiet=quiet, heal=heal))
+    except UnstartedError as error:
+        subject = ", ".join(run.spec.frontmatter.id for run in runs)
+        stop("unreachable", subject, f"{error}, so {_NOTHING}", scan=scan)
+
+
+async def _replayed(
+    runs: Sequence[StrictRun],
+    scan: Redactor,
+    *,
+    lines: bool,
+    quiet: bool,
+    heal: Callable[[StrictRun, Spending], Repair] | None,
+) -> list[Replayed]:
+    ended: list[Replayed] = []
+    async with started(async_playwright().start()) as playwright:
+        # Once per Playwright: a second registration is refused.
+        await register_identity_engine(playwright)
+        for run in runs:
+            began = time.monotonic()
+            replayed = await strict_replay(
+                run,
+                playwright,
+                scan,
+                heal=None if heal is None else partial(heal, run),
+            )
+            if lines and not (quiet and replayed.outcome == "passed"):
+                seconds = time.monotonic() - began
+                _said(scan, run.spec.frontmatter.id, replayed, seconds)
+            ended.append(replayed)
+    return ended
+
+
+def _said(scan: Redactor, spec_id: str, replayed: Replayed, seconds: float) -> None:
+    """Say how the run ended in one line, to stdout when it passed and to
+    stderr otherwise: the outcome, the time, what its model calls cost, which is
+    nothing with no model, the run record when it didn't pass, and
+    "non-resumable" whenever a side effect's outcome is unknown, alone if the
+    rest is withheld. Then each reason its document gives, where its egress
+    record is, and what a person reads of its heal proposal. A run that passed
+    has none of them."""
+    document = replayed.document
+    failed = replayed.outcome != "passed"
+    facts = [f"{seconds:.1f}s", f"${replayed.cost.normalize():f}"]
+    withheld = [WITHHELD.format(outcome=replayed.outcome, spec_id=spec_id)]
+    if failed and replayed.record is not None:
+        facts.append(f"run record: {replayed.record}")
+    if document.get("non_resumable"):
+        facts.append("non-resumable")
+        withheld.append("non-resumable")
+    lines = [f"{replayed.outcome} {spec_id}: {', '.join(facts)}"]
+    lines.extend(f"  {reason}" for reason in reasons_in(document))
+    if document.get("error_code") == "egress_blocked" and replayed.record is not None:
+        egress = replayed.record / "egress.json"
+        saved = "is" if egress.is_file() else "couldn't be saved to"
+        lines.append(f"  the egress record {saved} {egress}")
+    lines.extend(f"  {line}" for line in replayed.proposal)
+    say(scan, *lines, err=failed, withheld=withheld)

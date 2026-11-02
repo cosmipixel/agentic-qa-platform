@@ -17,7 +17,7 @@ from typing import Any, NoReturn
 import anthropic
 import pytest
 import typer.testing
-from aqa_cli import replay as replay_module
+from aqa_cli import common as replay_module
 from aqa_cli.main import app as aqa
 from aqa_core.compiled import CompiledScript
 from aqa_core.project import load_project
