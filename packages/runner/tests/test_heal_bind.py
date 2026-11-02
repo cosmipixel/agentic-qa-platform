@@ -140,18 +140,35 @@ def test_a_locator_that_spells_a_literal_claim_is_never_written(tmp_path: Path) 
     assert locators_of(run, "summary") == [{"role": "paragraph"}, {"css": "p"}]
 
 
-def test_a_locator_string_over_100_characters_is_never_written(tmp_path: Path) -> None:
-    # `#` and 100 characters.
-    long = "z" * 100
-    html = MOVED.replace("<button onclick", f'<button id="{long}" onclick')
+@pytest.mark.parametrize(
+    ("html", "pick", "locators"),
+    [
+        pytest.param(
+            # `#` and 100 characters.
+            MOVED.replace("<button onclick", f'<button id="{"z" * 100}" onclick'),
+            SHOW,
+            [
+                {"role": "button", "name": "Show details"},
+                {"css": "button", "scope": {"css": "#order"}},
+            ],
+            id="an_id",
+        ),
+        pytest.param(
+            # A name, a locator's second field.
+            MOVED.replace("Show details", "z" * 101),
+            rebinding("button", "z" * 101),
+            [{"css": "button", "scope": {"css": "#order"}}],
+            id="a_name",
+        ),
+    ],
+)
+def test_a_locator_string_over_100_characters_is_never_written(
+    tmp_path: Path, html: str, pick: Any, locators: list[dict[str, Any]]
+) -> None:
+    run = healed(tmp_path, pick, html=html)
 
-    run = healed(tmp_path, SHOW, html=html)
-
-    assert long not in json.dumps(locators_of(run, "toggle"))
-    assert locators_of(run, "toggle") == [
-        {"role": "button", "name": "Show details"},
-        {"css": "button", "scope": {"css": "#order"}},
-    ]
+    assert "z" * 100 not in json.dumps(locators_of(run, "toggle"))
+    assert locators_of(run, "toggle") == locators
 
 
 def test_a_locator_string_of_100_characters_is_written(tmp_path: Path) -> None:
@@ -162,6 +179,41 @@ def test_a_locator_string_of_100_characters_is_written(tmp_path: Path) -> None:
     run = healed(tmp_path, SHOW, html=html)
 
     assert {"css": f"#{long}"} in locators_of(run, "toggle")
+
+
+def test_a_labelled_field_with_a_check_elsewhere_keeps_its_label(
+    tmp_path: Path,
+) -> None:
+    """Only a check on the drifted target itself makes it an assertion's, whose
+    grammar has no label."""
+    script = compiled(
+        [
+            {
+                "seq": 1,
+                "action": "fill",
+                "target": "note",
+                "value": "x",
+                "side_effect": False,
+            }
+        ],
+        targets={
+            "note": {
+                "semantic": "the order's note",
+                "locators": [{"css": "input.gone"}],
+            },
+            "summary": SUMMARY,
+        },
+        assertions=DETAILS.model_dump(mode="json", exclude_none=True)["assertions"],
+    )
+    html = in_the_footer("<label>Note <input></label>").replace(" hidden>", ">")
+
+    run = healed(tmp_path, rebinding("textbox", "Note"), script=script, html=html)
+
+    assert locators_of(run, "note") == [
+        {"role": "textbox", "name": "Note"},
+        {"label": "Note"},
+        {"css": "input"},
+    ]
 
 
 THE_LINK = rebinding("link", "Elsewhere")
