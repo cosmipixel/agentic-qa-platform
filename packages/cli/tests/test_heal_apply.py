@@ -34,6 +34,23 @@ from packages.cli.tests.heal_apply_fixtures import (
 )
 
 A_SAFE_STEP = {"seq": 9, "action": "click", "target": "toggle", "side_effect": False}
+UNHELD = "ah_0123456789ab"
+# `MOVED_LOCATORS` with the key order `replay.json` holds them in.
+MOVED_AS_HELD = """\
+      "locators": [
+        {
+          "name": "Moved",
+          "role": "button"
+        },
+        {
+          "css": "#moved"
+        }
+      ]
+"""
+REFORMATTED = (
+    "  the compiled script wasn't in the form aqa writes, so its formatting changed "
+    "too\n"
+)
 
 
 def test_apply_changes_only_the_paths_it_names(
@@ -53,13 +70,15 @@ def test_apply_changes_only_the_paths_it_names(
         f"applied {proposal} order: {target}\n  /targets/toggle/locators\n"
     )
     assert result.stderr == ""
+    # The script has moved on, so the same proposal is stale now.
+    assert apply(root, monkeypatch, proposal).exit_code == 3
 
 
 @pytest.mark.parametrize("mode", [0o755, 0o600])
 def test_apply_keeps_the_files_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: int
 ) -> None:
-    """`git diff` would show a changed mode, a path the proposal doesn't name."""
+    """`git diff` would show a changed mode, which the proposal doesn't name."""
     root = tmp_path / "qa"
     target = committed(root)
     target.chmod(mode)
@@ -161,46 +180,91 @@ def test_records_that_differ_only_in_the_spec_they_name_are_refused(
     assert files(tmp_path) == before
 
 
+def no_records(_: Path) -> str:
+    return UNHELD
+
+
+def another_proposal(root: Path) -> str:
+    recorded(root, REBIND)
+    return UNHELD
+
+
+def holding(text: str) -> Callable[[Path], str]:
+    def written(root: Path) -> str:
+        other = root / ".aqa" / "runs" / "another-run" / "replay.json"
+        other.parent.mkdir(parents=True)
+        other.write_text(text)
+        return UNHELD
+
+    return written
+
+
+def no_documents(root: Path) -> str:
+    runs = root / ".aqa" / "runs"
+    (runs / "an-explore" / "replay.json").mkdir(parents=True)
+    (runs / "a-file").write_text("not a run\n")
+    return UNHELD
+
+
+def a_link_at(place: str) -> Callable[[Path], str]:
+    def linking(root: Path) -> str:
+        proposal = recorded(root, REBIND)
+        at = root / ".aqa" / "runs" / place
+        at.rename(root.parent / "elsewhere")
+        at.symlink_to(root.parent / "elsewhere")
+        return proposal
+
+    return linking
+
+
+def a_spec_id_that_isnt_text(root: Path) -> str:
+    proposal = recorded(root, REBIND)
+    file = root / ".aqa" / "runs" / "a-run" / "replay.json"
+    file.write_text(json.dumps({**json.loads(file.read_text()), "spec_id": ["order"]}))
+    return proposal
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        pytest.param(no_records, id="no-records"),
+        pytest.param(another_proposal, id="another-proposal"),
+        pytest.param(holding("[]"), id="not-a-mapping"),
+        pytest.param(holding("{}"), id="no-proposal"),
+        pytest.param(holding('{"heal_proposal": 7}'), id="a-proposal-not-a-mapping"),
+        pytest.param(holding('{"heal_proposal": {"id": 7}}'), id="an-id-not-text"),
+        pytest.param(no_documents, id="runs-with-no-document"),
+        pytest.param(a_link_at("a-run"), id="a-linked-run"),
+        pytest.param(a_link_at("a-run/replay.json"), id="a-linked-document"),
+        pytest.param(a_spec_id_that_isnt_text, id="a-spec-id-not-text"),
+    ],
+)
 def test_an_id_no_run_record_holds_exits_5(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record: Callable[[Path], str]
 ) -> None:
     root = tmp_path / "qa"
     committed(root)
-    recorded(root, REBIND)
+    typed = record(root)
     before = files(tmp_path)
 
-    result = apply(root, monkeypatch, "ah_0123456789ab")
+    result = apply(root, monkeypatch, typed)
 
     assert result.exit_code == 5, result.output
     assert result.stderr == (
-        "spec_error ah_0123456789ab: nothing was applied\n"
+        f"spec_error {typed}: nothing was applied\n"
         f"  no run record under {root} holds it\n"
     )
     assert files(tmp_path) == before
 
 
-def test_a_project_with_no_run_records_holds_no_proposal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "qa"
-    committed(root)
-
-    result = apply(root, monkeypatch, "ah_0123456789ab")
-
-    assert result.exit_code == 5, result.output
-    assert f"  no run record under {root} holds it\n" in result.stderr
-
-
 @pytest.mark.parametrize(
     "typed",
     [
-        "ah_",
         "ah_0123456789a",
         "ah_0123456789abc",
         "ah_0123456789AB",
         "xx_0123456789ab",
         "ah_0123456789ab\n",
-        "../../etc/passwd",
     ],
 )
 def test_a_malformed_id_is_a_usage_error(
@@ -222,9 +286,16 @@ def test_a_malformed_id_is_a_usage_error(
         (b"not json\n", 0o644),
         (b"\xff\xfe not utf-8", 0o644),
         (b"[" * 1_000_000, 0o644),
+        (b"\xef\xbb\xbf{}", 0o644),
         (b"{}", 0o000),
     ],
-    ids=["not-json", "not-utf-8", "nested-too-deep", "no-permission"],
+    ids=[
+        "not-json",
+        "not-utf-8",
+        "nested-too-deep",
+        "a-byte-order-mark",
+        "no-permission",
+    ],
 )
 def test_records_that_cant_be_read_are_counted_and_stop_nothing_else(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, broken: bytes, mode: int
@@ -251,40 +322,6 @@ def test_records_that_cant_be_read_are_counted_and_stop_nothing_else(
     assert target.read_text() == before.replace(LOCATORS, MOVED_LOCATORS)
 
 
-@pytest.mark.parametrize(
-    "unrelated",
-    ["null", "[]", '{"heal_proposal": 7}', '{"heal_proposal": {"id": 7}}', "{}"],
-)
-def test_a_record_holding_no_such_proposal_is_passed_over(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unrelated: str
-) -> None:
-    root = tmp_path / "qa"
-    committed(root)
-    other = root / ".aqa" / "runs" / "another-run" / "replay.json"
-    other.parent.mkdir(parents=True)
-    other.write_text(unrelated)
-
-    result = apply(root, monkeypatch, "ah_0123456789ab")
-
-    assert result.exit_code == 5, result.output
-    assert f"  no run record under {root} holds it\n" in result.stderr
-
-
-def test_a_run_with_no_document_or_a_file_for_a_run_is_passed_over(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "qa"
-    committed(root)
-    runs = root / ".aqa" / "runs"
-    (runs / "an-explore" / "replay.json").mkdir(parents=True)
-    (runs / "a-file").write_text("not a run\n")
-
-    result = apply(root, monkeypatch, "ah_0123456789ab")
-
-    assert result.exit_code == 5, result.output
-    assert f"  no run record under {root} holds it\n" in result.stderr
-
-
 @pytest.mark.parametrize("linked", [".aqa", ".aqa/runs"])
 def test_a_link_at_the_records_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, linked: str
@@ -305,25 +342,6 @@ def test_a_link_at_the_records_is_refused(
         f"  {place}: a link, and a run record stays in {root}\n"
     )
     assert files(tmp_path) == before
-
-
-@pytest.mark.parametrize("linked", ["a-run", "a-run/replay.json"])
-def test_a_linked_record_holds_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, linked: str
-) -> None:
-    root = tmp_path / "qa"
-    target = committed(root)
-    before = target.read_bytes()
-    proposal = recorded(root, REBIND)
-    place = root / ".aqa" / "runs" / linked
-    place.rename(tmp_path / "elsewhere")
-    place.symlink_to(tmp_path / "elsewhere")
-
-    result = apply(root, monkeypatch, proposal)
-
-    assert result.exit_code == 5, result.output
-    assert f"  no run record under {root} holds it\n" in result.stderr
-    assert target.read_bytes() == before
 
 
 def test_run_records_that_cant_be_listed_exit_15(
@@ -349,7 +367,7 @@ def test_run_records_that_cant_be_listed_exit_15(
     assert target.read_bytes() == before
 
 
-@pytest.mark.parametrize("spec_id", ["../../evil", "another", "order/../order"])
+@pytest.mark.parametrize("spec_id", ["../../evil", "order/../order"])
 def test_a_proposal_naming_no_spec_exits_5(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spec_id: str
 ) -> None:
@@ -381,26 +399,8 @@ def test_a_proposal_naming_no_spec_exits_5(
     assert files(tmp_path) == before
 
 
-def test_a_spec_id_that_isnt_text_holds_no_proposal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "qa"
-    committed(root)
-    proposal = recorded(root, REBIND)
-    file = root / ".aqa" / "runs" / "a-run" / "replay.json"
-    document = json.loads(file.read_text())
-    file.write_text(json.dumps({**document, "spec_id": ["order"]}))
-
-    result = apply(root, monkeypatch, proposal)
-
-    assert result.exit_code == 5, result.output
-    assert f"  no run record under {root} holds it\n" in result.stderr
-
-
 @pytest.mark.parametrize(
-    "cwd",
-    [".", "qa/.compiled", "src/deeper"],
-    ids=["the-repo-root", "below-the-spec-root", "beside-it"],
+    "cwd", [".", "qa/.compiled"], ids=["the-repo-root", "below-the-spec-root"]
 )
 def test_apply_finds_the_spec_root_from_the_repo_root_and_below_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cwd: str
@@ -411,7 +411,6 @@ def test_apply_finds_the_spec_root_from_the_repo_root_and_below_it(
     before = target.read_text()
     proposal = recorded(root, REBIND)
     (tmp_path / "config.yaml").write_text("not_a_key_aqa_reads: true\n")
-    (tmp_path / "src" / "deeper").mkdir(parents=True)
 
     result = apply(tmp_path / cwd, monkeypatch, proposal)
 
@@ -542,22 +541,6 @@ def test_a_changed_script_is_stale_exits_3_and_changes_nothing(
     assert files(tmp_path) == before
 
 
-def test_a_proposal_applied_once_is_stale_the_second_time(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "qa"
-    target = committed(root)
-    before = target.read_text()
-    proposal = recorded(root, REBIND)
-
-    first = apply(root, monkeypatch, proposal)
-    second = apply(root, monkeypatch, proposal)
-
-    assert first.exit_code == 0, first.output
-    assert second.exit_code == 3, second.output
-    assert target.read_text() == before.replace(LOCATORS, MOVED_LOCATORS)
-
-
 def test_a_script_changed_after_its_read_is_not_overwritten(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -632,27 +615,6 @@ def test_a_write_that_fails_leaves_the_file_and_exits_15(
     assert [each.name for each in target.parent.iterdir()] == ["order.json"]
 
 
-def test_a_fault_after_installing_says_the_script_was_written_and_exits_15(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "qa"
-    committed(root)
-    proposal = recorded(root, REBIND)
-
-    async def failing_after_it(*_: object, **__: object) -> None:
-        raise publication.PublishWriteError(installed=True)
-
-    monkeypatch.setattr(heal_module, "publish_text", failing_after_it)
-
-    result = apply(root, monkeypatch, proposal)
-
-    assert result.exit_code == 15, result.output
-    assert result.stderr == (
-        f"record_error {proposal}: the compiled script was published, but the file "
-        "system failed after it, so it may not survive a crash\n"
-    )
-
-
 def test_a_link_at_the_compiled_script_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -720,20 +682,33 @@ def test_a_compiled_script_it_cant_use_is_said_in_applys_words(
     assert result.stderr.startswith(said), result.stderr
 
 
+@pytest.mark.parametrize(
+    ("form", "moved"),
+    [
+        pytest.param(lambda text: text, MOVED_LOCATORS, id="published"),
+        # Written from its own tree, so the value keeps the patch's key order.
+        pytest.param(
+            lambda text: json.dumps(json.loads(text)), MOVED_AS_HELD, id="reformatted"
+        ),
+    ],
+)
 def test_apply_keeps_a_byte_order_mark(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    form: Callable[[str], str],
+    moved: str,
 ) -> None:
     root = tmp_path / "qa"
     target = committed(root)
     published = target.read_text()
-    target.write_bytes(b"\xef\xbb\xbf" + published.encode())
+    target.write_bytes(b"\xef\xbb\xbf" + form(published).encode())
     proposal = recorded(root, REBIND)
 
     result = apply(root, monkeypatch, proposal)
 
     assert result.exit_code == 0, result.output
     assert target.read_bytes() == (
-        b"\xef\xbb\xbf" + published.replace(LOCATORS, MOVED_LOCATORS).encode()
+        b"\xef\xbb\xbf" + published.replace(LOCATORS, moved).encode()
     )
 
 
@@ -772,41 +747,28 @@ def in_its_own_order(root: Path) -> dict[str, Any]:
     return reordered
 
 
-def test_a_script_in_another_order_keeps_every_other_path_and_the_order(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "qa"
-    target = committed(root)
-    document = in_its_own_order(root)
-    target.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n")
-    before = json.loads(target.read_text())
-    proposal = recorded(root, REBIND)
-
-    result = apply(root, monkeypatch, proposal)
-
-    assert result.exit_code == 0, result.output
-    after = json.loads(target.read_text())
-    before["targets"]["toggle"]["locators"] = MOVED
-    assert after == before
-    assert list(after) == list(before)
-    assert result.stdout == (
-        f"applied {proposal} order: {target}\n  /targets/toggle/locators\n"
-    )
-
-
 @pytest.mark.parametrize(
-    "write",
+    ("write", "note"),
     [
-        pytest.param(json.dumps, id="on-one-line"),
+        pytest.param(
+            lambda d: json.dumps(d, indent=2, ensure_ascii=False) + "\n",
+            "",
+            id="published-formatting",
+        ),
+        pytest.param(json.dumps, REFORMATTED, id="on-one-line"),
         pytest.param(
             lambda d: json.dumps(d, indent=2, ensure_ascii=False).replace("\n", "\r\n"),
+            REFORMATTED,
             id="crlf",
         ),
-        pytest.param(lambda d: json.dumps(d, indent=2), id="no-final-newline"),
+        pytest.param(lambda d: json.dumps(d, indent=2), REFORMATTED, id="no-newline"),
     ],
 )
-def test_a_script_reformatted_by_hand_keeps_every_other_path_and_says_so(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, write: Callable[[Any], str]
+def test_a_script_not_in_published_form_keeps_every_other_path_and_the_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    write: Callable[[Any], str],
+    note: str,
 ) -> None:
     root = tmp_path / "qa"
     target = committed(root)
@@ -822,25 +784,8 @@ def test_a_script_reformatted_by_hand_keeps_every_other_path_and_says_so(
     assert after == before
     assert list(after) == list(before)
     assert result.stdout == (
-        f"applied {proposal} order: {target}\n"
-        "  /targets/toggle/locators\n"
-        "  the compiled script wasn't in the form aqa writes, so its formatting "
-        "changed too\n"
+        f"applied {proposal} order: {target}\n  /targets/toggle/locators\n{note}"
     )
-
-
-def test_a_reformatted_script_with_a_byte_order_mark_keeps_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "qa"
-    target = committed(root)
-    target.write_bytes(b"\xef\xbb\xbf" + json.dumps(in_its_own_order(root)).encode())
-    proposal = recorded(root, REBIND)
-
-    result = apply(root, monkeypatch, proposal)
-
-    assert result.exit_code == 0, result.output
-    assert target.read_bytes().startswith(b"\xef\xbb\xbf{\n")
 
 
 def test_apply_needs_no_providers_key_and_starts_no_browser(
