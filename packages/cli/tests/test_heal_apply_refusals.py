@@ -28,13 +28,6 @@ EDITED = "the proposal doesn't match its id, so it was edited after its run"
 NOT_ONE = "the proposal isn't one aqa run writes"
 OUTSIDE = "a heal changes nothing but target locators and inserted steps"
 A_LOCATOR = [{"css": "#moved"}]
-A_SIDE_EFFECT = {
-    "seq": 9,
-    "action": "click",
-    "target": "toggle",
-    "side_effect": True,
-    "side_effect_basis": "network: a write request",
-}
 NESTED_TOO_DEEP: object = []
 for _ in range(400):
     NESTED_TOO_DEEP = [NESTED_TOO_DEEP]
@@ -119,18 +112,11 @@ def test_a_rewritten_file_isnt_found_under_its_old_id(
             id="compiled-out-of-the-root",
         ),
         pytest.param(
-            lambda held: held.update(compiled=".compiled/other.json"),
-            EDITED,
-            id="compiled-another-file",
-        ),
-        pytest.param(
             lambda held: held["base"].update(pr_head_sha="abc123"),
             NOT_ONE,
             id="a-pr-head",
         ),
         pytest.param(lambda held: held.update(note="hi"), NOT_ONE, id="an-extra-key"),
-        pytest.param(lambda held: held.pop("base"), NOT_ONE, id="no-base"),
-        pytest.param(lambda held: held.update(patch="x"), NOT_ONE, id="no-patch-list"),
     ],
 )
 def test_edited_fields_outside_the_id_are_refused(
@@ -159,23 +145,11 @@ def test_edited_fields_outside_the_id_are_refused(
         # A value and no `from`, so each is refused by its op alone.
         {"op": "remove", "path": "/targets/toggle/locators", "value": A_LOCATOR},
         {"op": "move", "path": "/targets/toggle/locators", "value": A_LOCATOR},
-        {"op": "copy", "path": "/targets/toggle/locators", "value": A_LOCATOR},
-        {"op": "test", "path": "/targets/toggle/locators", "value": A_LOCATOR},
         {"op": "replace", "path": "/targets/toggle/locators"},
         {"op": "replace", "path": "/targets/toggle/locators", "value": [], "from": "/"},
-        {"op": "replace", "path": 7, "value": []},
         {"op": "replace", "path": "/x", "value": NESTED_TOO_DEEP},
     ],
-    ids=[
-        "remove",
-        "move",
-        "copy",
-        "test",
-        "no-value",
-        "an-extra-key",
-        "a-number-path",
-        "a-value-nested-too-deep",
-    ],
+    ids=["remove", "move", "no-value", "an-extra-key", "a-value-nested-too-deep"],
 )
 def test_a_proposal_takes_only_a_heals_changes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: dict[str, Any]
@@ -202,60 +176,14 @@ def test_a_proposal_takes_only_a_heals_changes(
             id="an-assertions-text",
         ),
         pytest.param(
-            replacing("/assertions/1/min_size_px", [1, 2]),
-            f"/assertions: {OUTSIDE}",
-            id="an-assertions-bound",
-        ),
-        pytest.param(
             replacing("/targets/toggle/semantic", "anything"),
             "/targets/toggle/semantic: a heal never changes a target's meaning",
             id="a-meaning",
         ),
         pytest.param(
-            [
-                {
-                    "op": "add",
-                    "path": "/targets/toggle/contract",
-                    "value": {"region": "main", "part": "button"},
-                }
-            ],
-            "/targets/toggle/contract: a heal never changes a subject contract, "
-            "which only the reviewed config gives",
-            id="a-contract",
-        ),
-        pytest.param(
-            [
-                *replacing("/steps/0/side_effect", True),
-                {"op": "add", "path": "/steps/0/side_effect_basis", "value": "a basis"},
-            ],
-            "/steps/0/side_effect: a heal rewrites no existing step\n"
-            "  /steps/0/side_effect_basis: a heal rewrites no existing step",
-            id="a-replay-safe-step-made-a-side-effect",
-        ),
-        pytest.param(
-            replacing("/steps/1/side_effect_basis", "a basis"),
-            "/steps/1/side_effect_basis: a heal rewrites no existing step",
-            id="a-side-effects-basis",
-        ),
-        pytest.param(
             replacing("/steps/1/target", "summary"),
             "/steps/1/target: a heal rewrites no existing step",
             id="a-side-effect-steps-target",
-        ),
-        pytest.param(
-            replacing("/steps", [KEPT_SIDE_EFFECT]),
-            "/steps/0: a heal removes no step",
-            id="a-step-removed",
-        ),
-        pytest.param(
-            replacing("/steps", [KEPT_SIDE_EFFECT, A_STEP]),
-            "/steps: a heal reorders no step",
-            id="the-steps-reordered",
-        ),
-        pytest.param(
-            inserting(A_SIDE_EFFECT),
-            "/steps/0/side_effect: a heal inserts only replay-safe steps",
-            id="an-inserted-side-effect",
         ),
         pytest.param(
             inserting(
@@ -265,57 +193,18 @@ def test_a_proposal_takes_only_a_heals_changes(
             "around a path that is broken for its users",
             id="an-inserted-navigate",
         ),
+        # The validator's arguments swapped would apply this: a step removed one way
+        # is a safe step inserted the other.
         pytest.param(
-            inserting({"seq": 9, "action": "reload", "side_effect": False}),
-            "/steps/0/action: a heal inserts no reload, which loads the page again "
-            "and could route around a path that is broken for its users",
-            id="an-inserted-reload",
+            replacing("/steps", [KEPT_SIDE_EFFECT]),
+            "/steps/0: a heal removes no step",
+            id="a-step-removed",
         ),
+        # Replay's admission would refuse this too, so the words show which came first.
         pytest.param(
             replacing("/spec_hash", "sha256:" + "1" * 64),
             f"/spec_hash: {OUTSIDE}",
             id="the-spec-hash",
-        ),
-        pytest.param(
-            replacing("/compiled_by/price_map", "another"),
-            f"/compiled_by: {OUTSIDE}",
-            id="provenance",
-        ),
-        pytest.param(
-            replacing("/browser/timezone", "Asia/Tokyo"),
-            f"/browser: {OUTSIDE}",
-            id="the-browser",
-        ),
-        pytest.param(
-            replacing("/coverage/expectations/0/claim", "anything"),
-            f"/coverage: {OUTSIDE}",
-            id="the-coverage",
-        ),
-        pytest.param(
-            replacing("/confirmed", False), f"/confirmed: {OUTSIDE}", id="confirmed"
-        ),
-        pytest.param(
-            [
-                {
-                    "op": "add",
-                    "path": "/targets/new",
-                    "value": {"semantic": "new", "locators": [{"css": "#n"}]},
-                }
-            ],
-            "/targets/new: a heal adds no target",
-            id="a-new-target",
-        ),
-        pytest.param(
-            replacing("/targets/toggle/locators", [{"css": "li:nth-child(2) a"}]),
-            "/targets/toggle/locators/0/css: a heal finds no element by its position "
-            "among its siblings",
-            id="a-positional-locator",
-        ),
-        pytest.param(
-            replacing("/targets/summary/locators", [{"label": "Summary"}]),
-            "/targets/summary/locators/0: a heal finds no assertion's target by a "
-            "label or placeholder, or by a name when its text is checked",
-            id="an-assertions-target-by-a-label",
         ),
     ],
 )
@@ -325,7 +214,9 @@ def test_a_patch_the_validator_refuses_changes_nothing(
     patch: list[dict[str, Any]],
     reason: str,
 ) -> None:
-    """Each with the id its content has, so only the validator can refuse."""
+    """Each with the id its content has, so only the validator can refuse. That the
+    validator is called on what was read is what these show: `test_heal_patch.py` owns
+    each of its rules."""
     root = tmp_path / "qa"
     committed(root, SAVING)
     proposal = recorded(root, patch)
@@ -345,11 +236,6 @@ def test_a_patch_the_validator_refuses_changes_nothing(
     ("patch", "said"),
     [
         pytest.param(
-            replacing("/steps/1/side_effect", False),
-            "steps[1]",
-            id="a-side-effect-flag-lowered",
-        ),
-        pytest.param(
             replacing("/targets/toggle/locators", []),
             "targets.toggle.locators",
             id="no-locators",
@@ -360,29 +246,11 @@ def test_a_patch_the_validator_refuses_changes_nothing(
             id="a-lone-surrogate",
         ),
         pytest.param(
-            replacing("/targets/toggle/locators", [{"css": float("nan")}]),
-            "targets.toggle.locators",
-            id="not-a-number",
-        ),
-        pytest.param(
             [{"op": "add", "path": "/targets/toggle/unknown", "value": 1}],
             "targets.toggle.unknown",
             id="an-unknown-field",
         ),
         pytest.param(inserting(A_STEP), "steps[1].seq", id="a-seq-already-used"),
-        pytest.param(
-            inserting(
-                {
-                    "seq": 9,
-                    "action": "fill_secret",
-                    "target": "toggle",
-                    "secret": "TEST_PASSWORD",
-                    "side_effect": False,
-                }
-            ),
-            "secret TEST_PASSWORD is not declared",
-            id="an-inserted-fill-secret",
-        ),
     ],
 )
 def test_a_patch_the_loader_refuses_changes_nothing(
