@@ -916,8 +916,10 @@ def test_api_md_lists_every_explore_option() -> None:
         assert f"[{option}" in block
     [budget] = [line for line in block.splitlines() if "[--budget" in line]
     assert "[--budget <name>=<value>]..." in budget
+    # Explore's budgets are named there, and a heal's, which it refuses, aren't.
     for name in Budgets.model_fields:
-        assert re.search(rf"\b{name}\b", budget), name
+        named = re.search(rf"\b{name}\b", budget) is not None
+        assert named is not name.startswith("heal_"), name
     assert "planned" not in block
     shown = typer.testing.CliRunner().invoke(aqa, ["explore", "--help"]).stdout
     assert "--confirm-repeat" in re.sub(r"\x1b\[[0-9;]*m", "", shown)
