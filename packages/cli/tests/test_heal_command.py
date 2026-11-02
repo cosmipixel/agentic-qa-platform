@@ -74,26 +74,36 @@ def test_heal_without_the_providers_key_exits_5(
 
 
 @pytest.mark.parametrize(
-    ("words", "code"),
+    ("words", "code", "said"),
     [
-        pytest.param([], 2, id="nothing"),
-        pytest.param(["a.spec.md", "b.spec.md"], 2, id="two-specs"),
-        pytest.param(["apply"], 2, id="apply-and-no-id"),
+        pytest.param([], 2, "Missing argument", id="nothing"),
+        pytest.param(["a.spec.md", "b.spec.md"], 2, "give one spec", id="two-specs"),
+        pytest.param(["apply"], 2, "give one spec", id="apply-and-no-id"),
         pytest.param(
-            ["apply", "ah_0123456789ab", "ah_0123456789ac"], 2, id="apply-and-two-ids"
+            ["apply", "ah_0123456789ab", "ah_0123456789ac"],
+            2,
+            "give one spec",
+            id="apply-and-two-ids",
         ),
         pytest.param(
             ["apply", "ah_0123456789ab", "--url", "http://127.0.0.1:9"],
             2,
+            "with no --url",
             id="apply-and-a-url",
         ),
         # A path, not the word: it reaches the project, which says it holds no such
         # spec, where the word alone is a usage error.
-        pytest.param(["./apply"], 5, id="a-file-named-apply"),
+        pytest.param(
+            ["./apply"], 5, "apply: not a spec of the project", id="a-file-named-apply"
+        ),
     ],
 )
 def test_heal_takes_one_spec_or_apply_and_an_id(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, words: list[str], code: int
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    words: list[str],
+    code: int,
+    said: str,
 ) -> None:
     order_at(tmp_path / "qa")
     (tmp_path / "qa" / "apply").write_text("a file\n")
@@ -102,6 +112,8 @@ def test_heal_takes_one_spec_or_apply_and_an_id(
     result = heal(*words)
 
     assert result.exit_code == code, result.output
+    # Typer's error box wraps a usage error's words at any width.
+    assert said in " ".join(result.stderr.replace("│", " ").split())
 
 
 def test_heal_help_shows_both_forms() -> None:
