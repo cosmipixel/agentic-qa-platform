@@ -8,7 +8,7 @@ and before Playwright's driver starts, which must inherit no environment a
 test secret's binding refused (#215): it resolves; its compiled script,
 `<spec root>/.compiled/<spec id>.json`, read as explore reads it, with no
 link on the way (`publication`), exists and loads, and replay admits it
-(`executor.admitted`), each a spec error (exit 5), or 15 for a file that
+(`admission.admitted`), each a spec error (exit 5), or 15 for a file that
 can't be read; and its test secrets bind (12). Then each runs in argument
 order (`aqa_runner.strict_replay`), on one driver.
 
@@ -29,8 +29,8 @@ from aqa_core.compiled import CompiledScript
 from aqa_core.config import ProjectConfig
 from aqa_core.project import SpecError, load_compiled
 from aqa_core.spec import Spec
+from aqa_runner.admission import BoundValueSpelledError, admitted
 from aqa_runner.bound_secrets import BoundSecret, MissingSecretError, SecretLoggedError
-from aqa_runner.executor import BoundValueSpelledError, admitted
 from aqa_runner.locator_generation import register_identity_engine
 from aqa_runner.publication import publication
 from aqa_runner.redaction import Redactor

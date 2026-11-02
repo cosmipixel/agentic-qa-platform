@@ -22,7 +22,7 @@ from aqa_core.config import ProjectConfig
 from aqa_core.coverage_plan import CoveragePlan
 from aqa_core.project import load_compiled, load_config
 from aqa_core.spec import Reset
-from aqa_runner import executor, explore, replays, settling
+from aqa_runner import admission, executor, explore, replays, settling
 from aqa_runner.chat_client import ChatClient
 from aqa_runner.egress_proxy import EgressProxy, ListenerUnavailableError
 from aqa_runner.explore import Explored
@@ -606,7 +606,7 @@ def test_the_confirmation_scans_with_the_same_bound_values_as_the_run(
             super().__init__(*args)
             made.append(self)
 
-    monkeypatch.setattr(executor, "Redactor", Kept)
+    monkeypatch.setattr(admission, "Redactor", Kept)
 
     run = confirming(
         app,

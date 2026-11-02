@@ -42,6 +42,7 @@ from aqa_core.project import (
     with_budgets,
 )
 from aqa_core.spec import Spec
+from aqa_runner.admission import accepted
 from aqa_runner.anthropic_client import (
     KEY_VARIABLE,
     AnthropicClient,
@@ -54,7 +55,6 @@ from aqa_runner.bound_secrets import (
 )
 from aqa_runner.coverage_plan import judge, make_plan
 from aqa_runner.egress_proxy import ListenerUnavailableError
-from aqa_runner.executor import accepted
 from aqa_runner.explore import Drivers, Explored
 from aqa_runner.explore import explore as explore_spec
 from aqa_runner.model_router import ModelCallError, ModelRouter

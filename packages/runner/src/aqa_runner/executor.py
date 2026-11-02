@@ -8,46 +8,30 @@ Browser observations use the session methods, which check every document
 they touch (ADR-0026). Probe reads use the same egress gate as the browser."""
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import Literal
 
 from aqa_core.compiled import (
-    Assertion,
     Click,
     CompiledScript,
     Fill,
     FillSecret,
     Navigate,
     Press,
-    ProbeEquals,
-    ProbeEqualsBaseline,
     Reload,
-    Select,
-    Step,
-    Target,
-    VisibleUnoccluded,
 )
 from aqa_core.config import ProjectConfig
-from aqa_core.heal_patch import heal_patch_problems
-from aqa_core.project import (
-    SpecError,
-    contract_problems,
-    parse_compiled,
-    path_on_origin,
-    start_url,
-)
-from aqa_core.spec import Spec, secret_references
+from aqa_core.project import path_on_origin, start_url
+from aqa_core.spec import Spec
 from playwright.async_api import Browser, BrowserType, ElementHandle, Error
-from pydantic_core import PydanticSerializationError
 
 from aqa_runner import probes, reasons
-from aqa_runner.bound_secrets import BoundSecret, bound_secrets
+from aqa_runner.admission import Targeted, Untargeted, admitted, intent_action
+from aqa_runner.bound_secrets import BoundSecret
 from aqa_runner.browser_session import (
     BrowserSession,
-    one_key,
     open_browser_session,
     prepared_session,
 )
@@ -78,6 +62,7 @@ from aqa_runner.invariants import InvariantResult, invariant_results
 from aqa_runner.locators import Miss, Resolved
 from aqa_runner.reasons import UnansweredError
 from aqa_runner.redaction import Redacted, Redactor
+from aqa_runner.repairs import Handing, Repair, Repaired, StepAt
 from aqa_runner.run_record import STEPS, RefusedWriteError, RunRecord, require_clean
 from aqa_runner.secret_fields import SecretRefusedError
 from aqa_runner.settling import Settled, Window
@@ -86,11 +71,6 @@ from aqa_runner.settling import Settled, Window
 # session's lock: Playwright's default, made explicit. An action's wait is
 # bounded by the run's `resolve_seconds` instead (ADR-0024's #46 amendment).
 NAVIGATION_SECONDS = 30
-
-
-# The steps the executor runs: those that act on a target, and the rest.
-type Targeted = Click | Fill | FillSecret | Select
-type Untargeted = Navigate | Reload | Press
 
 # How a step ended: dispatched and settled; its target never resolved, so
 # nothing was dispatched; or dispatching or settling raised, so its outcome
@@ -153,40 +133,6 @@ class StepResult:
     settled: Settled | None = None
     misses: tuple[Miss, ...] = ()
     error: str | None = None
-
-
-@dataclass(frozen=True)
-class Drift:
-    """The step a replay paused at, for its repair: its target didn't
-    resolve, so nothing was dispatched; each locator's miss; deep copies of
-    that step and of the script in use, the committed one or an earlier
-    repair's, so an edit to either reaches nothing replay holds; and the
-    live session, which the repair observes through and dispatches nothing
-    with."""
-
-    step: Targeted
-    misses: tuple[Miss, ...]
-    script: CompiledScript
-    session: BrowserSession
-
-
-# What a replay hands a drifted step to: the whole script to go on with.
-# Returning the script it was handed gives up, and the step stays drifted.
-type Repair = Callable[[Drift], Awaitable[CompiledScript]]
-
-
-@dataclass(frozen=True)
-class Repaired:
-    """One drifted step's repair, as `repairs/<seq>.json` records it: the
-    step's seq and misses; why replay refused the script offered, each
-    problem scanned, none when it was taken; and the script the run went on
-    with, as replay parsed it, None when refused. A repair that offers the
-    script it was handed gives up: neither problems nor a script."""
-
-    seq: int
-    misses: tuple[Miss, ...]
-    problems: tuple[Redacted, ...]
-    script: CompiledScript | None
 
 
 @dataclass(frozen=True)
@@ -265,7 +211,7 @@ async def replay(
     elsewhere in the environment `SecretLoggedError`, and a binding the run
     doesn't allow `SpecError`. A bound value's
     spelling in the start path, a step's action or a target's name or
-    locators raises `SpecError` too (`_spelling_bound_values`). The run
+    locators raises `SpecError` too (`admission.admitted`). The run
     scans with the record's scan when that covers every secret it binds, as
     `aqa replay`'s covers every spec's, and with its own secrets' otherwise.
     When that scan holds a test secret, filled or not, every reason keeps
@@ -279,10 +225,10 @@ async def replay(
 
     With `setup.repair`, a step whose target drifted, in a run nothing has
     interrupted, goes to that repair (`Drift`), once. The script it offers
-    is checked and recorded before the run goes on with it (`_repaired`),
-    the drifted step first, which keeps no evidence of its drift; a refused
-    one, or the script it was handed, ends the run as drift. What the
-    repair raises leaves as any failure here does."""
+    is checked and recorded before the run goes on with it
+    (`repairs.Handing`), the drifted step first, which keeps no evidence of
+    its drift; a refused one, or the script it was handed, ends the run as
+    drift. What the repair raises leaves as any failure here does."""
     try:
         replayed = await _replayed(
             script, setup, gate, every_locator, chromium=chromium, proxy=proxy
@@ -402,9 +348,19 @@ async def _replayed(
         violated = _violated(session, setup.spec)
         # Repairs are checked against replay's own copy of the script: the
         # session, which a repair is handed, holds `script.browser`.
-        committed = script.model_copy(deep=True)
+        handing = (
+            None
+            if setup.repair is None
+            else Handing(
+                setup.repair,
+                script.model_copy(deep=True),
+                record,
+                setup.config,
+                setup.spec,
+                session,
+            )
+        )
         pending, in_use = list(runnable), script
-        repairs: list[Repaired] = []
         while pending and steps[-1].outcome == "completed" and not interrupted():
             step = pending[0]
             result = await _run(session, run, step, interrupted)
@@ -414,22 +370,14 @@ async def _replayed(
             # repair stops the run, so a repair is never asked twice. None
             # once the run is interrupted, which stops it anyway.
             if (
-                setup.repair is not None
+                handing is not None
                 and result.outcome == "drifted"
                 and not isinstance(step, Navigate | Reload | Press)
-                and all(repaired.seq != step.seq for repaired in repairs)
+                and not handing.handed(at := StepAt(step))
                 and not interrupted()
             ):
-                handed = in_use.model_copy(deep=True)
-                drift = Drift(
-                    step.model_copy(deep=True), result.misses, handed, session
-                )
-                offered = await setup.repair(drift)
                 ran = in_use.steps[: len(steps) - 1]
-                repaired = await _repaired(
-                    run, committed, result, offered, ran, in_use=in_use
-                )
-                repairs.append(repaired)
+                repaired = await handing.hand(at, result.misses, in_use, ran)
                 if (patched := repaired.script) is not None:
                     run = replace(
                         run, evaluation=replace(run.evaluation, targets=patched.targets)
@@ -463,7 +411,7 @@ async def _replayed(
         tuple(events.kept),
         events.total,
         evidence,
-        tuple(repairs),
+        () if handing is None else tuple(handing.repaired),
     )
 
 
@@ -538,144 +486,6 @@ async def _observed(session: BrowserSession, budget: float) -> Redacted | None:
         return None
 
 
-class BoundValueSpelledError(SpecError):
-    """A bound value is spelled where the run would write or use it
-    (`_spelling_bound_values`): a spec error found once the spec's test
-    secrets are bound, with that binding, so whoever prints the refusal
-    can scan it with them."""
-
-    def __init__(
-        self, problems: Sequence[str], bound: Mapping[str, BoundSecret]
-    ) -> None:
-        super().__init__(problems)
-        self.bound = bound
-
-
-def admitted(
-    script: CompiledScript, spec: Spec, config: ProjectConfig, start: str
-) -> tuple[
-    list[Targeted | Untargeted], list[Assertion], Mapping[str, BoundSecret], Redactor
-]:
-    """`script`'s steps and assertions, and the test secrets a run of `spec`
-    from the start origin `start` binds with their scan, once nothing stops
-    `script` before anything is opened: it is compiled from the spec as it
-    is, agrees with `config`'s subject contracts and runs in M1
-    (`accepted`); every secret the spec references has a value
-    (`bound_secrets`); and no bound value is spelled where the run would
-    write or use it (`_spelling_bound_values`), which raises
-    `BoundValueSpelledError`. Otherwise `SpecError`, or `bound_secrets`'
-    own error. The script's own problems come first, so a spec error wins
-    over a missing value (exit 5 before 12), and a stale script's other
-    problems are moot. Public so `aqa replay` admits every spec before any
-    run's reset (#239)."""
-    if script.spec_hash != spec.spec_hash:
-        raise SpecError(["compiled from another version of the spec: explore it again"])
-    if problems := contract_problems(script, config):
-        raise SpecError(problems)
-    runnable, checks = accepted(script, spec)
-    bound = bound_secrets(spec, start)
-    redactor = Redactor(bound.values())
-    if problems := _spelling_bound_values(spec, runnable, script.targets, redactor):
-        raise BoundValueSpelledError(problems, bound)
-    return runnable, checks, bound, redactor
-
-
-def _spelling_bound_values(
-    spec: Spec,
-    steps: list[Targeted | Untargeted],
-    targets: Mapping[str, Target],
-    redactor: Redactor,
-) -> list[str]:
-    """Each place, among what replay writes to the steps journal or hands
-    the browser to find a target with, holding a spelling of a value
-    `redactor` binds, as written or JSON-escaped, as the journal writes it:
-    the start path, each step's action as its intent records it, and each
-    target's name, every string of its locators, scopes included, and its
-    subject contract's region and part (`Redactor.spells`). A place is named
-    by its position, never by its text (SECURITY §5: keeping values out of
-    `steps.jsonl` is the caller's preflight)."""
-    places: list[tuple[str, object]] = [
-        ("preconditions.start_url", spec.frontmatter.preconditions.start_url)
-    ]
-    places.extend(
-        (f"steps[{index}] (seq {step.seq})", _action(step))
-        for index, step in enumerate(steps)
-    )
-    places.extend(
-        (
-            f"targets[{index}]",
-            [name, target.model_dump(mode="json", exclude={"semantic"})],
-        )
-        for index, (name, target) in enumerate(targets.items())
-    )
-    return [
-        f"{place}: a bound value's spelling is in it, so the replay doesn't start"
-        for place, value in places
-        if redactor.spells(value)
-    ]
-
-
-def _action(step: Targeted | Untargeted) -> dict[str, object]:
-    """`step` as its intent records it: as compiled, less its seq, which the
-    line holds, its side-effect fields and its links to the coverage plan."""
-    return step.model_dump(
-        mode="json", exclude={"seq", "side_effect", "side_effect_basis", "satisfies"}
-    )
-
-
-def accepted(
-    script: CompiledScript, spec: Spec
-) -> tuple[list[Targeted | Untargeted], list[Assertion]]:
-    """`script`'s steps and assertions, or `SpecError` naming each step and
-    check M1 can't run, before anything is opened (ADR-0024's #46
-    amendment), and each `fill_secret` naming a secret `spec` doesn't
-    reference, which has no binding in the run. Probe assertions and baseline
-    definitions must name probes declared by the spec. Public because a
-    script replay would refuse is never up to date (`aqa explore`, #216)."""
-    referenced = {name for _, name in secret_references(spec.frontmatter)}
-    runnable: list[Targeted | Untargeted] = []
-    checks: list[Assertion] = []
-    problems: list[str] = []
-    for index, step in enumerate(script.steps):
-        where = f"steps[{index}] (seq {step.seq})"
-        if isinstance(step, FillSecret) and step.secret not in referenced:
-            problems.append(
-                f"{where}: fill_secret names {step.secret}, which the spec doesn't "
-                "reference, so this run has no binding for it"
-            )
-        elif isinstance(step, Press) and not one_key(step.key):
-            problems.append(
-                f"{where}: press takes one key, with only modifiers held before "
-                f"it: {step.key[:40]!r}"
-            )
-        else:
-            runnable.append(step)
-    declared = spec.frontmatter.preconditions.probes
-    for index, assertion in enumerate(script.assertions):
-        if (
-            isinstance(assertion, ProbeEquals | ProbeEqualsBaseline)
-            and assertion.probe not in declared
-        ):
-            problems.append(
-                f"assertions[{index}] ({assertion.id}): probe {assertion.probe} is not declared by the spec"
-            )
-        if isinstance(assertion, VisibleUnoccluded) and not assertion.in_viewport:
-            problems.append(
-                f"assertions[{index}] ({assertion.id}): "
-                "visible_unoccluded requires in_viewport: true"
-            )
-        else:
-            checks.append(assertion)
-    problems.extend(
-        f"probe_baselines[{name}]: probe {name} is not declared by the spec"
-        for name in script.probe_baselines
-        if name not in declared
-    )
-    if problems:
-        raise SpecError(problems)
-    return runnable, checks
-
-
 async def _run(
     session: BrowserSession,
     run: _Replay,
@@ -696,7 +506,7 @@ async def _run(
         return StepResult(step.seq, "failed", error=run.evaluation.reason(error))
     setup = run.setup
     budget = setup.config.budgets.resolve_seconds
-    action = _action(step)
+    action = intent_action(step)
     if isinstance(step, Navigate | Reload | Press):
         wait = budget if isinstance(step, Press) else NAVIGATION_SECONDS
         return (
@@ -728,98 +538,6 @@ async def _run(
         ),
         lambda: _targeted(session, step, found.element, run.secrets),
     )
-
-
-async def _repaired(
-    run: _Replay,
-    committed: CompiledScript,
-    drifted: StepResult,
-    offered: CompiledScript,
-    ran: Sequence[Step],
-    *,
-    in_use: CompiledScript,
-) -> Repaired:
-    """The repair of the step `drifted`, whose repair offered `offered`,
-    recorded in `repairs/<seq>.json`: taken, as the loader reads its JSON,
-    once nothing refuses it, or given up, with neither problems nor a
-    script, when the loader reads it as `in_use`, the script the repair was
-    handed a copy of. The first of these to find problems refuses it, and
-    each problem is scanned: its JSON, which must hold only values its
-    fields' types allow (refused unquoted) and no bound value's spelling;
-    the loader's rules, which a `model_copy` skips; the heal-patch
-    validator, against `committed`, replay's own copy of the script it was
-    given, which no repair holds; its first steps must be those that ran,
-    `ran`, unchanged, since the run goes on after them; replay's own
-    admission (`accepted`); and the record, which checks the document as
-    written and refuses one that spells a bound value, so nothing runs
-    that isn't recorded. The refusal is recorded through the same check,
-    which raises `RefusedWriteError` when the document still spells a
-    value once its problems are scanned: a miss or a scan's marker can.
-    The validator searches text checks' patterns in a child process, so it
-    runs off the loop, which keeps the proxy serving."""
-    seq, record = drifted.seq, run.setup.record
-    name = f"repairs/{seq}.json"
-    clean = require_clean(record.redactor, name)
-    problems: Sequence[str]
-    try:
-        # A field of a type `model_copy` let through makes the serializer
-        # warn, quoting its value: raised here, and its text never kept.
-        text = offered.model_dump_json(warnings="error")
-        # Before any problem names a part of it: a validator's pointer
-        # escapes `/` and `~` (RFC 6901), a spelling no scan finds.
-        clean(text)
-        patched = parse_compiled(text, run.setup.config, source=Path(name))
-        if patched.model_dump(mode="json") == in_use.model_dump(mode="json"):
-            gave_up = Repaired(seq, drifted.misses, (), None)
-            record.write(name, _repair_record(gave_up), check=clean)
-            return gave_up
-        problems = await asyncio.to_thread(heal_patch_problems, committed, patched)
-        if not problems:
-            problems = _ran_problems(patched, ran)
-        if not problems:
-            accepted(patched, run.setup.spec)
-            taken = Repaired(seq, drifted.misses, (), patched)
-            record.write(name, _repair_record(taken), check=clean)
-            return taken
-    except PydanticSerializationError:
-        problems = [
-            f"{name}: a field holds a value its type doesn't allow, so it isn't read"
-        ]
-    except SpecError as error:
-        problems = error.problems
-    except RefusedWriteError as error:
-        problems = [str(error)]
-    scanned = tuple(record.redactor.redact(problem) for problem in problems)
-    refused = Repaired(seq, drifted.misses, scanned, None)
-    record.write(name, _repair_record(refused), check=clean)
-    return refused
-
-
-def _ran_problems(patched: CompiledScript, ran: Sequence[Step]) -> list[str]:
-    """Why `patched` doesn't begin with `ran`, the steps that ran, as the
-    script in use holds them. The validator reads only the committed
-    script, so this also keeps an earlier repair's inserted steps that ran
-    as they ran: what the record holds as run must be what ran."""
-    kept = patched.steps[: len(ran)]
-    if [step.seq for step in kept] != [step.seq for step in ran]:
-        return ["/steps: a repair inserts no step before a step that already ran"]
-    return [
-        f"/steps/{index}: a repair rewrites no step that already ran"
-        for index, (now, was) in enumerate(zip(kept, ran, strict=True))
-        if now.model_dump(mode="json") != was.model_dump(mode="json")
-    ]
-
-
-def _repair_record(repaired: Repaired) -> dict[str, object]:
-    script = repaired.script
-    return {
-        "seq": repaired.seq,
-        "misses": list(repaired.misses),
-        "problems": list(repaired.problems),
-        "script": None
-        if script is None
-        else script.model_dump(mode="json", exclude_none=True),
-    }
 
 
 def _untargeted(

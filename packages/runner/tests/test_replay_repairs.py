@@ -17,9 +17,10 @@ from aqa_core.compiled import Click, CompiledScript, Fill, Press, Target
 from aqa_core.project import load_config, load_spec
 from aqa_runner.egress_proxy import EgressProxy
 from aqa_runner.evaluation import AssertionResult
-from aqa_runner.executor import Drift, RunResult
+from aqa_runner.executor import RunResult
 from aqa_runner.locator_generation import register_identity_engine
 from aqa_runner.locators import Miss
+from aqa_runner.repairs import Drift, StepAt
 from aqa_runner.replays import Opened, Replaying, replay_run
 from aqa_runner.run_record import RefusedWriteError, RunRecord
 from playwright.async_api import async_playwright
@@ -136,7 +137,7 @@ def test_a_repaired_step_runs_again_and_every_assertion_is_evaluated(
 ) -> None:
     run = repairing(tmp_path, lambda drift: rebound(drift.script))
 
-    assert [(drift.step.seq, drift.misses) for drift in run.handed] == [(1, MISSES)]
+    assert [(drift.at.key, drift.misses) for drift in run.handed] == [("1", MISSES)]
     assert outcomes(run) == [(0, "completed", ()), (1, "completed", ())]
     assert run.result.assertions == (
         AssertionResult("a1", "pass", locator_index=0),
@@ -157,7 +158,7 @@ def document(run: Repairing, seq: int) -> object:
 
 def repairs(run: Repairing) -> list[tuple[object, ...]]:
     return [
-        (repaired.seq, repaired.misses, repaired.problems, repaired.script)
+        (repaired.at.key, repaired.misses, repaired.problems, repaired.script)
         for repaired in run.result.repairs
     ]
 
@@ -174,7 +175,7 @@ def test_the_patched_script_is_recorded_and_the_committed_one_is_unchanged(
         "problems": [],
         "script": patched.model_dump(mode="json", exclude_none=True),
     }
-    assert repairs(run) == [(1, MISSES, (), patched)]
+    assert repairs(run) == [("1", MISSES, (), patched)]
     assert run.committed.model_dump(mode="json") == run.before
 
 
@@ -232,7 +233,7 @@ def test_a_refused_repair_ends_the_run_as_drift_with_its_problems_recorded(
         "problems": [problem],
         "script": None,
     }
-    assert repairs(run) == [(1, MISSES, (problem,), None)]
+    assert repairs(run) == [("1", MISSES, (problem,), None)]
 
 
 def adding_a_target(drift: Drift) -> CompiledScript:
@@ -248,7 +249,7 @@ def test_a_repair_that_edits_the_script_it_was_handed_is_checked_against_the_com
     run = repairing(tmp_path, adding_a_target)
 
     problem = "/targets/extra: a heal adds no target"
-    assert repairs(run) == [(1, MISSES, (problem,), None)]
+    assert repairs(run) == [("1", MISSES, (problem,), None)]
     assert run.committed.model_dump(mode="json") == run.before
 
 
@@ -256,10 +257,11 @@ def rewriting_the_step_in_place(drift: Drift) -> CompiledScript:
     """The script `drift` handed over, rebound, holding the step it handed
     over with its fields written in place: a frozen model's storage is
     still writable."""
-    vars(drift.step).update(
+    assert isinstance(drift.at, StepAt)
+    vars(drift.at.step).update(
         target="summary", side_effect=True, side_effect_basis="network: POST /order"
     )
-    return rebound(drift.script).model_copy(update={"steps": (drift.step,)})
+    return rebound(drift.script).model_copy(update={"steps": (drift.at.step,)})
 
 
 def test_a_repair_that_rewrites_the_step_it_was_handed_in_place_is_refused(
@@ -272,7 +274,7 @@ def test_a_repair_that_rewrites_the_step_it_was_handed_in_place_is_refused(
         "/steps/0/side_effect_basis: a heal rewrites no existing step",
         "/steps/0/target: a heal rewrites no existing step",
     )
-    assert repairs(run) == [(1, MISSES, problems, None)]
+    assert repairs(run) == [("1", MISSES, problems, None)]
     assert run.committed.model_dump(mode="json") == run.before
 
 
@@ -291,7 +293,7 @@ def test_a_repair_is_checked_against_the_script_as_replay_was_given_it(
     run = repairing(tmp_path, retiming_the_session)
 
     problem = "/browser: a heal changes nothing but target locators and inserted steps"
-    assert repairs(run) == [(1, MISSES, (problem,), None)]
+    assert repairs(run) == [("1", MISSES, (problem,), None)]
 
 
 def test_a_step_that_drifts_again_after_its_repair_stops_the_run(
@@ -307,7 +309,7 @@ def test_a_step_that_drifts_again_after_its_repair_stops_the_run(
         tmp_path, lambda drift: rebound(drift.script, locators=still_missing)
     )
 
-    assert [drift.step.seq for drift in run.handed] == [1]
+    assert [drift.at.key for drift in run.handed] == ["1"]
     assert outcomes(run) == [(0, "completed", ()), (1, "drifted", MISSES)]
     assert run.result.assertions == (
         AssertionResult("a1", "not_evaluated", stopped_at=1),
@@ -321,7 +323,7 @@ def test_a_repair_that_offers_the_script_it_was_handed_gives_up(
     run = repairing(tmp_path, lambda drift: drift.script)
 
     assert outcomes(run) == [(0, "completed", ()), (1, "drifted", MISSES)]
-    assert repairs(run) == [(1, MISSES, (), None)]
+    assert repairs(run) == [("1", MISSES, (), None)]
     assert document(run, 1) == {
         "seq": 1,
         "misses": ["not unanimous", "no match"],
@@ -347,7 +349,7 @@ TWO_CLICKS = DETAILS.model_copy(
 def rebinding_each(drift: Drift) -> CompiledScript:
     """The script `drift` handed over, with the drifted step's target bound
     as the moved page has it."""
-    if drift.step.seq == 1:
+    if drift.at.key == "1":
         return rebound(drift.script)
     footer = {**CONTACT, "locators": [{"css": "button", "scope": {"css": "footer"}}]}
     targets = {**drift.script.targets, "contact": Target.model_validate(footer)}
@@ -359,9 +361,9 @@ def test_a_later_drift_gets_its_own_repair_handed_the_script_in_use(
 ) -> None:
     run = repairing(tmp_path, rebinding_each, script=TWO_CLICKS)
 
-    assert [(drift.step.seq, drift.misses) for drift in run.handed] == [
-        (1, MISSES),
-        (2, ("no match",)),
+    assert [(drift.at.key, drift.misses) for drift in run.handed] == [
+        ("1", MISSES),
+        ("2", ("no match",)),
     ]
     assert run.handed[1].script.targets["toggle"] == Target.model_validate(MOVED_TOGGLE)
     assert outcomes(run) == [
@@ -369,7 +371,10 @@ def test_a_later_drift_gets_its_own_repair_handed_the_script_in_use(
         (1, "completed", ()),
         (2, "completed", ()),
     ]
-    assert [(r.seq, r.problems) for r in run.result.repairs] == [(1, ()), (2, ())]
+    assert [(r.at.key, r.problems) for r in run.result.repairs] == [
+        ("1", ()),
+        ("2", ()),
+    ]
     assert run.result.outcome == "passed"
 
 
@@ -378,9 +383,9 @@ def rewriting_an_inserted_step_that_ran(drift: Drift) -> CompiledScript:
     pressed first; for the contact button, rebound too, with that press,
     which ran, made an Enter."""
     rebinding = rebinding_each(drift)
-    key = "Tab" if drift.step.seq == 1 else "Enter"
+    key = "Tab" if drift.at.key == "1" else "Enter"
     press = Press(seq=3, action="press", key=key, side_effect=False)
-    kept = rebinding.steps if drift.step.seq == 1 else rebinding.steps[1:]
+    kept = rebinding.steps if drift.at.key == "1" else rebinding.steps[1:]
     return rebinding.model_copy(update={"steps": (press, *kept)})
 
 
@@ -390,9 +395,9 @@ def test_a_later_repair_that_rewrites_an_inserted_step_that_ran_is_refused(
     run = repairing(tmp_path, rewriting_an_inserted_step_that_ran, script=TWO_CLICKS)
 
     problem = "/steps/0: a repair rewrites no step that already ran"
-    assert [(r.seq, r.problems) for r in run.result.repairs] == [
-        (1, ()),
-        (2, (problem,)),
+    assert [(r.at.key, r.problems) for r in run.result.repairs] == [
+        ("1", ()),
+        ("2", (problem,)),
     ]
     assert outcomes(run) == [
         (0, "completed", ()),
@@ -473,7 +478,7 @@ def test_a_repair_that_inserts_a_step_before_one_that_ran_is_refused(
     run = repairing(tmp_path, inserting_before_the_tab, script=TAB_FIRST)
 
     problem = "/steps: a repair inserts no step before a step that already ran"
-    assert repairs(run) == [(2, MISSES, (problem,), None)]
+    assert repairs(run) == [("2", MISSES, (problem,), None)]
     assert outcomes(run) == [
         (0, "completed", ()),
         (1, "completed", ()),
@@ -552,7 +557,7 @@ def test_a_repaired_script_that_spells_a_bound_value_is_refused(
     run = repairing(tmp_path, offer, spec_at=secret_spec_at)
 
     problem = "repairs/1.json: a bound value's spelling is in it, so it isn't written"
-    assert repairs(run) == [(1, MISSES, (problem,), None)]
+    assert repairs(run) == [("1", MISSES, (problem,), None)]
     assert document(run, 1) == {
         "seq": 1,
         "misses": ["not unanimous", "no match"],
@@ -583,7 +588,7 @@ def test_a_repaired_script_holding_a_value_its_field_doesnt_allow_is_refused_unq
     problem = (
         "repairs/1.json: a field holds a value its type doesn't allow, so it isn't read"
     )
-    assert repairs(run) == [(1, MISSES, (problem,), None)]
+    assert repairs(run) == [("1", MISSES, (problem,), None)]
     assert held(tmp_path, FAKE_VALUE, run) == []
 
 
@@ -597,7 +602,7 @@ def test_a_refusals_problems_are_scanned_before_they_are_recorded(
     run = repairing(tmp_path, naming_a_target(SLASHED), spec_at=secret_spec_at)
 
     problem = "/targets/[SECRET:TEST_PASSWORD]: a heal adds no target"
-    assert repairs(run) == [(1, MISSES, (problem,), None)]
+    assert repairs(run) == [("1", MISSES, (problem,), None)]
     assert held(tmp_path, pointer(SLASHED), run) == []
 
 

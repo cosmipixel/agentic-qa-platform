@@ -50,7 +50,7 @@ _UNSAVED: Final = "replay.json could not be written to the run record"
 
 @dataclass(frozen=True)
 class StrictRun:
-    """One spec's strict replay, admitted (`executor.admitted`): its spec
+    """One spec's strict replay, admitted (`admission.admitted`): its spec
     root, spec, project config and start origin, the compiled script, and
     the test secrets the run binds."""
 
