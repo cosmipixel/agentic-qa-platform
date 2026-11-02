@@ -66,7 +66,14 @@ from aqa_runner.invariants import InvariantResult, invariant_results
 from aqa_runner.locators import Miss, Resolved
 from aqa_runner.reasons import UnansweredError
 from aqa_runner.redaction import Redacted, Redactor
-from aqa_runner.repairs import AssertionAt, Handing, Repair, Repaired, StepAt
+from aqa_runner.repairs import (
+    AssertionAt,
+    Handing,
+    Repair,
+    Repaired,
+    StepAt,
+    rebind_refusal,
+)
 from aqa_runner.run_record import STEPS, RefusedWriteError, RunRecord, require_clean
 from aqa_runner.secret_fields import SecretRefusedError
 from aqa_runner.settling import Settled, Window
@@ -102,11 +109,14 @@ class RunSetup:
 @dataclass(frozen=True)
 class _Replay:
     """State belonging to one replay: its setup, the secrets its script
-    fills, and what evaluating its assertions needs."""
+    fills, what evaluating its assertions needs, and its own copy of the
+    script it was given, which every check of a repair reads and nothing
+    handed to a repair holds: the session holds `script.browser`."""
 
     setup: RunSetup
     secrets: Mapping[str, BoundSecret]
     evaluation: Evaluation
+    committed: CompiledScript
 
 
 @dataclass(frozen=True)
@@ -234,7 +244,8 @@ async def replay(
     its drift; a refused one, or the script it was handed, ends the run as
     drift. Once every step has completed, a positive check whose target
     drifted goes to it too (`_evaluated`). What the repair raises leaves as
-    any failure here does."""
+    any failure here does. A step through a target a repair rebound passes a
+    gate before its intent (`repairs.rebind_refusal`)."""
     try:
         replayed = await _replayed(
             script, setup, gate, every_locator, chromium=chromium, proxy=proxy
@@ -308,6 +319,7 @@ async def _replayed(
             script.probe_baselines,
             every_locator=every_locator,
         ),
+        script.model_copy(deep=True),
     )
     record = setup.record
     steps: list[StepResult] = []
@@ -352,14 +364,12 @@ async def _replayed(
         # whatever the path did after; one the final checks first show
         # keeps the last step's, the page they ran on.
         violated = _violated(session, setup.spec)
-        # Repairs are checked against replay's own copy of the script: the
-        # session, which a repair is handed, holds `script.browser`.
         handing = (
             None
             if setup.repair is None
             else Handing(
                 setup.repair,
-                script.model_copy(deep=True),
+                run.committed,
                 record,
                 setup.config,
                 setup.spec,
@@ -579,21 +589,34 @@ async def _run(
         EgressUpstreamError,
     ) as error:
         return StepResult(step.seq, "failed", error=run.evaluation.reason(error))
-    setup = run.setup
-    budget = setup.config.budgets.resolve_seconds
-    action = intent_action(step)
     if isinstance(step, Navigate | Reload | Press):
-        wait = budget if isinstance(step, Press) else NAVIGATION_SECONDS
+        wait = (
+            run.setup.config.budgets.resolve_seconds
+            if isinstance(step, Press)
+            else NAVIGATION_SECONDS
+        )
         return (
             None
             if interrupted()
             else await dispatched(
                 session,
-                setup.record,
-                Dispatch(step.seq, action, step.side_effect, wait),
-                lambda: _untargeted(session, step, setup.start),
+                run.setup.record,
+                Dispatch(step.seq, intent_action(step), step.side_effect, wait),
+                lambda: _untargeted(session, step, run.setup.start),
             )
         )
+    return await _run_targeted(session, run, step, interrupted)
+
+
+async def _run_targeted(
+    session: BrowserSession,
+    run: _Replay,
+    step: Targeted,
+    interrupted: Callable[[], bool],
+) -> StepResult | None:
+    """Find `step`'s target, gate it when a repair rebound it
+    (`repairs.rebind_refusal`), then record and dispatch `step`."""
+    budget = run.setup.config.budgets.resolve_seconds
     try:
         found = await look_for(session, run.evaluation, step.target, "action")
     except (Error, PolicyEventError) as error:
@@ -603,13 +626,30 @@ async def _run(
         return StepResult(step.seq, "failed", error=run.evaluation.reason(error))
     if not isinstance(found, Resolved):
         return StepResult(step.seq, "drifted", misses=found.misses)
+    committed = run.committed.targets[step.target]
+    if run.evaluation.targets[step.target] != committed:
+        refused = await rebind_refusal(
+            session,
+            step,
+            found.element,
+            committed,
+            secret=run.secrets[step.secret] if isinstance(step, FillSecret) else None,
+            budget=budget,
+        )
+        if refused is not None:
+            return StepResult(step.seq, "failed", error=refused)
     if interrupted():
         return None
     return await dispatched(
         session,
-        setup.record,
+        run.setup.record,
         Dispatch(
-            step.seq, action, step.side_effect, budget, step.target, found.locator_index
+            step.seq,
+            intent_action(step),
+            step.side_effect,
+            budget,
+            step.target,
+            found.locator_index,
         ),
         lambda: _targeted(session, step, found.element, run.secrets),
     )

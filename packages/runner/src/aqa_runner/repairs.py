@@ -4,18 +4,21 @@ offers, and the record of each handoff. The executor decides when something
 drifted; `Handing` does the rest."""
 
 import asyncio
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Final
 
 from aqa_core.compiled import (
+    ByRole,
     Click,
     CompiledScript,
     Fill,
     FillSecret,
     Select,
     Step,
+    Target,
     TextInTarget,
     VisibleUnoccluded,
 )
@@ -23,13 +26,43 @@ from aqa_core.config import ProjectConfig
 from aqa_core.heal_patch import heal_patch_problems, pointer
 from aqa_core.project import SpecError, parse_compiled
 from aqa_core.spec import Spec
+from playwright.async_api import ElementHandle, Error, Page
 from pydantic_core import PydanticSerializationError
 
+from aqa_runner import reasons
 from aqa_runner.admission import Targeted, accepted
+from aqa_runner.binding import is_among, same_element
+from aqa_runner.bound_secrets import BoundSecret
 from aqa_runner.browser_session import BrowserSession
-from aqa_runner.locators import Miss
+from aqa_runner.document_origins import DocumentChangedError, PolicyEventError
+from aqa_runner.evaluation import MARGIN_SECONDS, bounded
+from aqa_runner.locators import Miss, Resolved, resolve
+from aqa_runner.reasons import UnansweredError
 from aqa_runner.redaction import Redacted
 from aqa_runner.run_record import RefusedWriteError, RunRecord, require_clean
+from aqa_runner.secret_fields import SecretNotFilledError, SecretRefusedError
+
+# Why a step through a rebound target didn't run, in fixed words (ADR-0024's
+# #244 amendment): the page chooses what its elements say, never these.
+_OTHER_ROLE: Final = (
+    "a repair rebound this step's target to an element without its committed "
+    "role, so the step did not run"
+)
+_TAKES_NO_TEXT: Final = (
+    "a repair rebound this step's target to an element that takes no text, so "
+    "the step did not run"
+)
+_NOT_A_SELECT: Final = (
+    "a repair rebound this step's target to an element that is no select "
+    "control, so the step did not run"
+)
+_UNANCHORED: Final = (
+    "a repair rebound this step's target to an element no committed locator "
+    "finds alone, so the step did not run"
+)
+_BROKE: Final = (
+    "the page broke the checks on this step's rebound target, so it did not run"
+)
 
 
 @dataclass(frozen=True)
@@ -214,6 +247,117 @@ class Handing:
             name, _repair_record(refused), check=require_clean(redactor, name)
         )
         return refused
+
+
+async def rebind_refusal(
+    session: BrowserSession,
+    step: Targeted,
+    element: ElementHandle,
+    committed: Target,
+    *,
+    secret: BoundSecret | None,
+    budget: float,
+) -> Redacted | None:
+    """Why `step` may not act on `element`, the element a target a repair
+    rebound now resolves to, or None, read before its intent, so a refusal
+    leaves nothing unresolved and the run stays resumable (ADR-0024's #244
+    amendment): the role `committed`, the target as committed, says, when its
+    locators name one; a `fill` or `fill_secret` needs an editable element, and
+    a `select` a select control; a side-effect or `fill_secret` step needs the
+    anchor (`_found_alone`); and a `fill_secret` needs its binding
+    (`BrowserSession.secret_refusal`), last, since it holds the session's lock
+    itself. It keeps a test secret from the wrong element and a repair from
+    acting on one the committed locators can't vouch for. A look that raises
+    or that the page doesn't answer refuses it too, with a reason from the
+    run's closed vocabulary (`aqa_runner.reasons`) or fixed words."""
+    redactor = session.redactor
+    refused: str | None = None
+    try:
+        async with session.observing_page() as page:
+            refused = await _cut_off(_refusal(page, step, element, committed), budget)
+        if refused is None and secret is not None:
+            await bounded(session.secret_refusal(element, secret), budget)
+    except (
+        PolicyEventError,
+        DocumentChangedError,
+        UnansweredError,
+        SecretRefusedError,
+        SecretNotFilledError,
+    ) as error:
+        return reasons.reason(error, redactor)
+    except Error:
+        # Playwright's general error type: the page broke a read, or closed.
+        refused = _BROKE
+    return None if refused is None else redactor.redact(refused)
+
+
+async def _refusal(
+    page: Page, step: Targeted, element: ElementHandle, committed: Target
+) -> str | None:
+    """The checks that read the page: the element's role, its kind for
+    `step`'s action, and the anchor. Each reads the element as it is now: a
+    page can change it while a repair works, and any repair can offer it."""
+    role = next(
+        (each.role for each in committed.locators if isinstance(each, ByRole)), None
+    )
+    if role is not None and not await is_among(page.get_by_role(role), element):
+        return _OTHER_ROLE
+    if isinstance(step, Fill | FillSecret) and not await _editable(element):
+        return _TAKES_NO_TEXT
+    if isinstance(step, Select) and not await is_among(
+        page.locator("css=select"), element
+    ):
+        return _NOT_A_SELECT
+    if (step.side_effect or isinstance(step, FillSecret)) and not await _found_alone(
+        page, element, committed
+    ):
+        return _UNANCHORED
+    return None
+
+
+async def _editable(element: ElementHandle) -> bool:
+    """Whether `element` takes text now. Playwright raises for a kind that
+    never can, which is the same answer."""
+    try:
+        return await element.is_editable()
+    except Error:
+        return False
+
+
+async def _found_alone(page: Page, element: ElementHandle, committed: Target) -> bool:
+    """The anchor: whether some committed locator, alone, still finds `element`
+    for an action, inside the target's region when it has a contract."""
+    for locator in committed.locators:
+        alone = committed.model_copy(update={"locators": (locator,)})
+        found = await resolve(page, alone, "action")
+        if isinstance(found, Resolved):
+            try:
+                if await same_element(element, found.element):
+                    return True
+            finally:
+                await found.element.dispose()
+    return False
+
+
+async def _cut_off[T](look: Coroutine[Any, Any, T], budget: float) -> T:
+    """`look`'s result, or `UnansweredError` when the page hasn't answered
+    within `budget` seconds and `MARGIN_SECONDS` past them. `evaluation.bounded`
+    waits for a look it cancels to finish, and a look that holds an element or
+    a region lets go of it with one more read, which a page that stopped
+    answering never answers (`binding.same_element`, `binding.held_region`). So
+    `look` runs as a task of its own, which nothing waits for once it is cut
+    off; it ends when the session's browser closes."""
+    seconds = budget + MARGIN_SECONDS
+    task = asyncio.ensure_future(look)
+    # So a look cut off that ends in an error logs nothing when it ends.
+    task.add_done_callback(lambda ended: ended.cancelled() or ended.exception())
+    try:
+        await asyncio.wait({task}, timeout=seconds)
+    finally:
+        task.cancel()
+    if not task.done():
+        raise UnansweredError(seconds)
+    return task.result()
 
 
 def _acted_through(ran: Sequence[Step]) -> set[str]:
