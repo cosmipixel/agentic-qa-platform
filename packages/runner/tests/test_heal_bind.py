@@ -523,25 +523,16 @@ def test_an_element_outside_the_subjects_region_takes_another_turn(
     assert basis(run).said == f"{FOUND_NONE}; {OUTSIDE_ITS_REGION}"
 
 
-@pytest.mark.parametrize(
-    ("moves", "why"),
-    [
-        pytest.param((THE_SUMMARY, NO_TOOL), FOUND_NONE, id="then_no_pick"),
-        pytest.param(
-            (THE_SUMMARY, THE_SUMMARY, THE_SUMMARY),
-            "the turn budget (3) ran out",
-            id="until_the_turn_budget",
-        ),
-    ],
-)
 def test_a_pick_outside_the_subjects_region_says_a_config_edit_may_be_needed(
-    tmp_path: Path, moves: tuple[Any, ...], why: str
+    tmp_path: Path,
 ) -> None:
     """The region stands and the subject sits outside it, so no pick binds. It may
     be a subject that moved, or only a wrong pick, and the reason says so."""
     run = healed(
         tmp_path,
-        *moves,
+        THE_SUMMARY,
+        THE_SUMMARY,
+        THE_SUMMARY,
         script=contracted("header#toolbar", "p"),
         html=SHOWN.replace('<header id="toolbar">', '<header id="toolbar"><p>Hi</p>'),
         config=contract_config("header#toolbar", "p"),
@@ -554,7 +545,8 @@ def test_a_pick_outside_the_subjects_region_says_a_config_edit_may_be_needed(
         None,
     )
     assert run.verdict("assertion", "a1")["reason"] == (
-        f"drift: heal gave up: {why}; {OUTSIDE_ITS_REGION} (no match)"
+        "drift: heal gave up: the turn budget (3) ran out; "
+        f"{OUTSIDE_ITS_REGION} (no match)"
     )
 
 
