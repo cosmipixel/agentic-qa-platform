@@ -193,22 +193,23 @@ async def isolated_origin(page: Page) -> str | None:
     https://chromedevtools.github.io/devtools-protocol/tot/Page/#method-createIsolatedWorld
     https://chromedevtools.github.io/devtools-protocol/tot/Runtime/#method-evaluate"""
     cdp = await page.context.new_cdp_session(page)
-    try:
-        tree = await cdp.send("Page.getFrameTree")
-        world = await cdp.send(
-            "Page.createIsolatedWorld",
-            {"frameId": tree["frameTree"]["frame"]["id"], "worldName": "aqa-origin"},
-        )
-        read = await cdp.send(
-            "Runtime.evaluate",
-            {
-                "expression": "self.origin",
-                "contextId": world["executionContextId"],
-                "returnByValue": True,
-            },
-        )
-    finally:
-        await cdp.detach()
+    tree = await cdp.send("Page.getFrameTree")
+    world = await cdp.send(
+        "Page.createIsolatedWorld",
+        {"frameId": tree["frameTree"]["frame"]["id"], "worldName": "aqa-origin"},
+    )
+    read = await cdp.send(
+        "Runtime.evaluate",
+        {
+            "expression": "self.origin",
+            "contextId": world["executionContextId"],
+            "returnByValue": True,
+        },
+    )
+    # Only once the reads have answered: a busy page never answers `detach`
+    # either, and a limit that cancelled a read cancels nothing again. A session
+    # left behind by a read that failed ends with its page.
+    await cdp.detach()
     # An opaque origin serializes as "null", which no URL parse reads as one.
     return document_origin(str(read["result"]["value"]), None)
 
