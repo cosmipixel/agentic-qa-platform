@@ -401,7 +401,7 @@ class PilotInputTests(unittest.TestCase):
 
     def test_a_defect_elsewhere_in_admission_propagates(self) -> None:
         defect = ValueError("fake admission defect")
-        self.enterContext(patch("aqa_runner.executor.accepted", side_effect=defect))
+        self.enterContext(patch("aqa_runner.admission.accepted", side_effect=defect))
         for call in (self.load, self.memory):
             with self.subTest(seam=call.__name__):
                 with self.assertRaises(ValueError) as caught:

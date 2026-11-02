@@ -17,8 +17,8 @@ from aqa_core.project import (
 )
 from aqa_core.schema import parse_origin
 from aqa_core.spec import Spec
+from aqa_runner.admission import admitted
 from aqa_runner.bound_secrets import MissingSecretError, SecretLoggedError
-from aqa_runner.executor import admitted
 
 
 class UnusableSecretError(ValueError):
@@ -94,7 +94,7 @@ def validate_pilot(
 ) -> PilotInput:
     """`script`, already read strictly, admitted for `spec`: covering each of
     its expectations, reset by a valid hook when a step has side effects, and
-    admitted as replay admits it (`aqa_runner.executor.admitted`): compiled
+    admitted as replay admits it (`aqa_runner.admission.admitted`): compiled
     from the spec as it is now, agreeing with the project's subject
     contracts, runnable by the executor, spelling no bound value where the
     run would use it, and with every test secret the spec references bound
@@ -145,7 +145,7 @@ def _secrets_bind(
 ) -> bool:
     """Whether each test secret `spec` references binds for a run from
     `start`, once the executor admits `script` as replay does, before
-    anything is opened (`aqa_runner.executor.admitted`, #239). Anything else
+    anything is opened (`aqa_runner.admission.admitted`, #239). Anything else
     it refuses is a SpecError, a binding the run doesn't allow included. A
     value with surrogates fails to encode with a UnicodeEncodeError holding
     it, so the binding's errors are dropped; any other ValueError is a
