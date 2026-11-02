@@ -23,6 +23,7 @@ from packages.runner.tests import executor_fixtures as fx
 from packages.runner.tests.drift_fixtures import DETAILS
 from packages.runner.tests.secret_fixtures import FAKE_VALUE
 from packages.runner.tests.test_replay_repairs import (
+    CLICKED_TWICE,
     MOVED,
     Repairing,
     outcomes,
@@ -137,6 +138,32 @@ def test_a_rebound_element_without_the_committed_role_is_not_dispatched(
 
 
 BY_THE_ORDER = {"css": "button", "scope": {"css": "#order"}}
+# The moved page, whose toggle makes itself a link once it is clicked.
+BECOMES_A_LINK = MOVED.replace(
+    "document.querySelector('#details').hidden = false",
+    "this.setAttribute('role', 'link')",
+)
+
+
+def test_a_later_step_through_a_rebound_target_passes_the_gate_again(
+    tmp_path: Path,
+) -> None:
+    run = repairing(
+        tmp_path,
+        bound_to("toggle", BY_THE_ORDER),
+        script=CLICKED_TWICE,
+        html=BECOMES_A_LINK,
+    )
+
+    assert outcomes(run) == [
+        (0, "completed", ()),
+        (1, "completed", ()),
+        (2, "failed", ()),
+    ]
+    assert run.result.steps[2].error == OTHER_ROLE
+    assert states(run) == RAN_THE_STEP
+
+
 # A field no locator finds on the moved page, with no role locator.
 NOTE = {"locators": [{"css": "input.note"}]}
 FILL = {"action": "fill", "value": "x"}
