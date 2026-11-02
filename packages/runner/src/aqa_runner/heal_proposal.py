@@ -3,6 +3,7 @@ run that healed asks a person to accept, as `replay.json` holds it and as `aqa
 run` prints it. Nothing applies it: `aqa heal apply` is #247's."""
 
 import difflib
+from collections.abc import Iterator
 
 from aqa_core.compiled import CompiledScript
 from aqa_core.heal_patch import json_patch, proposal_id
@@ -18,6 +19,20 @@ def final_script(
     committed one."""
     taken = [repaired.script for repaired in repairs if repaired.script is not None]
     return taken[-1] if taken else committed
+
+
+def rebinds(
+    committed: CompiledScript, repairs: tuple[Repaired, ...]
+) -> Iterator[tuple[str, Repaired]]:
+    """Each change a taken repair made to a target's locators, in order: the
+    target's name, and the repair."""
+    previous = committed
+    for repaired in repairs:
+        if (script := repaired.script) is not None:
+            for name, target in script.targets.items():
+                if target.locators != previous.targets[name].locators:
+                    yield name, repaired
+            previous = script
 
 
 def proposal_document(
@@ -46,16 +61,10 @@ def proposal_lines(
     page's own ARIA, so a decoy can match them, and a reviewer's evidence is the
     locator diff (ADR-0024's #244 amendment)."""
     final = final_script(committed, repairs)
-    bound: dict[str, str] = {}
-    previous = committed
-    for repaired in repairs:
-        if (script := repaired.script) is None:
-            continue
-        said = "" if repaired.basis is None else repaired.basis.said
-        for name, target in script.targets.items():
-            if target.locators != previous.targets[name].locators:
-                bound[name] = said
-        previous = script
+    bound = {
+        name: "" if repaired.basis is None else repaired.basis.said
+        for name, repaired in rebinds(committed, repairs)
+    }
     return (
         f"heal proposal {proposal}:",
         *(

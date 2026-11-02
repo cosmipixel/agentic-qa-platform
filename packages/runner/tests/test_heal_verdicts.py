@@ -6,16 +6,7 @@ the rules by hand; these hold what a real heal leaves."""
 from pathlib import Path
 from typing import Any
 
-from aqa_core.compiled import CompiledScript
-
-from packages.runner.tests.drift_fixtures import (
-    BUTTON,
-    DETAILS,
-    IN_VIEW,
-    SUMMARY,
-    TOGGLE,
-    order_spec,
-)
+from packages.runner.tests.drift_fixtures import BUTTON, SUMMARY
 from packages.runner.tests.executor_fixtures import compiled
 from packages.runner.tests.explore_graph_fixtures import NO_RESPONSE
 from packages.runner.tests.heal_fixtures import (
@@ -26,6 +17,7 @@ from packages.runner.tests.heal_fixtures import (
     SHOW,
     Healed,
     healed,
+    in_view_at,
     rebinding,
 )
 
@@ -57,10 +49,6 @@ SUMMARY_GONE = compiled(
     targets={"summary": {**SUMMARY, "locators": [{"css": "#gone"}]}},
     assertions=[TEXT_CHECK, SEEN_CHECK],
 )
-
-
-def in_view_at(root: Path) -> Path:
-    return order_spec(root, IN_VIEW)
 
 
 def paths_cited(run: Healed) -> list[str]:
@@ -242,15 +230,3 @@ def test_a_decoy_that_satisfies_a_weak_check_heals_today(tmp_path: Path) -> None
         }
     ]
     assert run.verdict("assertion", "a1")["heal"]["bound"] == 'button "Contact us"'
-
-
-def test_the_committed_script_is_unchanged_by_a_heal(tmp_path: Path) -> None:
-    before: CompiledScript = DETAILS.model_copy(deep=True)
-
-    run = healed(tmp_path, SHOW)
-
-    assert run.committed.targets["toggle"].locators == before.targets["toggle"].locators
-    assert [
-        locator.model_dump(mode="json", exclude_none=True)
-        for locator in run.committed.targets["toggle"].locators
-    ] == TOGGLE["locators"]

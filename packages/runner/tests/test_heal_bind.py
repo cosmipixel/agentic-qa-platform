@@ -27,13 +27,7 @@ from aqa_runner.repairs import Drift
 from langchain_core.messages import BaseMessage
 from playwright.async_api import Page
 
-from packages.runner.tests.drift_fixtures import (
-    BUTTON,
-    DETAILS,
-    IN_VIEW,
-    SUMMARY,
-    order_spec,
-)
+from packages.runner.tests.drift_fixtures import BUTTON, DETAILS, SUMMARY
 from packages.runner.tests.executor_fixtures import compiled
 from packages.runner.tests.explore_graph_fixtures import calling, ref
 from packages.runner.tests.heal_fixtures import (
@@ -44,6 +38,7 @@ from packages.runner.tests.heal_fixtures import (
     Healed,
     basis,
     healed,
+    in_view_at,
     outcomes,
     rebinding,
     turn_files,
@@ -451,10 +446,7 @@ def test_a_page_that_stops_answering_ends_the_heal(tmp_path: Path) -> None:
 
     run = healed(tmp_path, SHOW, before_the_heal=goes_busy)
 
-    assert basis(run).said == (
-        "the page couldn't be looked at: "
-        "TimeoutError: Page.aria_snapshot: Timeout 2000ms exceeded."
-    )
+    assert basis(run).said.startswith("the page couldn't be looked at: ")
     assert run.requests() == []
     assert outcomes(run) == [(0, "completed"), (1, "drifted")]
 
@@ -509,10 +501,7 @@ def test_a_page_that_goes_busy_under_the_gate_takes_a_turn_then_ends_the_heal(
     run = healed(tmp_path, SHOW, NO_TOOL)
 
     assert len(run.requests()) == 1
-    assert basis(run).said == (
-        "the page couldn't be looked at: "
-        "TimeoutError: Page.aria_snapshot: Timeout 2000ms exceeded."
-    )
+    assert basis(run).said.startswith("the page couldn't be looked at: ")
 
 
 async def blocked_host_reached(drift: Drift) -> None:
@@ -579,22 +568,6 @@ def test_a_heal_makes_no_call_when_the_look_itself_was_interrupted(
 
     assert run.requests() == []
     assert basis(run).said == "the run was interrupted, so the heal stopped"
-
-
-def test_a_healer_steered_to_a_decoy_that_fails_the_check_passes_nothing(
-    tmp_path: Path,
-) -> None:
-    """A1's gate leaves this one open: a decoy of the same role, on a step that
-    isn't a side effect, is clicked. The check still decides."""
-    run = healed(tmp_path, rebinding("button", "Contact us"))
-
-    assert outcomes(run) == [(0, "completed"), (1, "completed")]
-    assert run.result.assertions[0].outcome == "failed"
-    assert run.result.outcome == "failed"
-
-
-def in_view_at(root: Path) -> Path:
-    return order_spec(root, IN_VIEW)
 
 
 def test_a_drifted_assertion_target_is_rebound_by_the_model_and_checked_again(

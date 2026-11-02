@@ -84,6 +84,10 @@ def shipping_at(root: Path) -> Path:
     return order_spec(root, SHIPPING)
 
 
+def in_view_at(root: Path) -> Path:
+    return order_spec(root, IN_VIEW)
+
+
 def with_budgets(budgets: str) -> str:
     return f"budgets: {{ resolve_seconds: 2, {budgets} }}\n"
 
@@ -91,15 +95,14 @@ def with_budgets(budgets: str) -> str:
 @dataclass(frozen=True)
 class Healed:
     """A run that healed on a scripted model: its result, its record's
-    directory, the model, each request the app saw, the committed script and
-    the run's spend."""
+    directory, the model, each request the app saw, the committed script, each
+    drift the repair was handed, and how the run ended."""
 
     result: RunResult
     record: Path
     client: Scripted
     seen: list[tuple[str, str]]
     committed: CompiledScript
-    spending: Spending
     drifts: list[Drift]
     end: ReplayEnd
 
@@ -190,9 +193,7 @@ def healed(
         tuple(run_gate.infrastructure_events),
         base=BLOB,
     )
-    return Healed(
-        result, record.path, client, app.seen, committed, spending, drifts, end
-    )
+    return Healed(result, record.path, client, app.seen, committed, drifts, end)
 
 
 def outcomes(run: Healed) -> list[tuple[int, str]]:
