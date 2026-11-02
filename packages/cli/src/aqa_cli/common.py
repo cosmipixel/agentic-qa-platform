@@ -1,6 +1,6 @@
-"""What `aqa explore`, `aqa replay` and `aqa run` share (API.md §7): resolving a
-spec, writing through one output boundary that fails closed (ADR-0026's #53 P17
-amendment), stopping with an outcome and its exit code, starting and stopping
+"""What `aqa explore`, `aqa replay`, `aqa run` and `aqa heal` share (API.md §7):
+resolving a spec, writing through one output boundary that fails closed (ADR-0026's
+#53 P17 amendment), stopping with an outcome and its exit code, starting and stopping
 Playwright's driver, and the runner `replay` and `run` both are.
 
 Everything a command prints goes through `rendered`, which scans the whole text

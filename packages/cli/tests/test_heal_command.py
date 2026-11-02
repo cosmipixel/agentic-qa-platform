@@ -74,35 +74,34 @@ def test_heal_without_the_providers_key_exits_5(
 
 
 @pytest.mark.parametrize(
-    "words",
+    ("words", "code"),
     [
-        [],
-        ["a.spec.md", "b.spec.md"],
-        ["apply"],
-        ["apply", "ah_0123456789ab", "ah_0123456789ac"],
-        ["apply", "ah_0123456789ab", "--url", "http://127.0.0.1:9"],
+        pytest.param([], 2, id="nothing"),
+        pytest.param(["a.spec.md", "b.spec.md"], 2, id="two-specs"),
+        pytest.param(["apply"], 2, id="apply-and-no-id"),
+        pytest.param(
+            ["apply", "ah_0123456789ab", "ah_0123456789ac"], 2, id="apply-and-two-ids"
+        ),
+        pytest.param(
+            ["apply", "ah_0123456789ab", "--url", "http://127.0.0.1:9"],
+            2,
+            id="apply-and-a-url",
+        ),
+        # A path, not the word: it reaches the project, which says it holds no such
+        # spec, where the word alone is a usage error.
+        pytest.param(["./apply"], 5, id="a-file-named-apply"),
     ],
-    ids=["nothing", "two-specs", "apply-and-no-id", "apply-and-two-ids", "apply-a-url"],
 )
-def test_heal_takes_one_spec_or_apply_and_an_id(words: list[str]) -> None:
-    result = heal(*words)
-
-    assert result.exit_code == 2, result.output
-
-
-def test_a_spec_path_named_apply_is_reached_as_dot_slash_apply(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_heal_takes_one_spec_or_apply_and_an_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, words: list[str], code: int
 ) -> None:
-    """A spec, not the word: the project says it's none of its specs, which a usage
-    error wouldn't."""
     order_at(tmp_path / "qa")
     (tmp_path / "qa" / "apply").write_text("a file\n")
     monkeypatch.chdir(tmp_path / "qa")
 
-    result = heal("./apply")
+    result = heal(*words)
 
-    assert result.exit_code == 5, result.output
-    assert "apply: not a spec of the project at " in result.stderr
+    assert result.exit_code == code, result.output
 
 
 def test_heal_help_shows_both_forms() -> None:

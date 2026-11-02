@@ -633,7 +633,7 @@ def test_a_script_reformatted_by_hand_keeps_every_other_path_and_says_so(
     assert result.stdout == (
         f"applied {proposal} order: {target}\n"
         "  /targets/toggle/locators\n"
-        "  the compiled script wasn't in the form aqa writes, so its whitespace "
+        "  the compiled script wasn't in the form aqa writes, so its formatting "
         "changed too\n"
     )
 
