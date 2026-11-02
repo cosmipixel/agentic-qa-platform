@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 from aqa_core.compiled import CompiledScript
 from aqa_core.config import ProjectConfig
-from aqa_core.project import SpecError, load_compiled
+from aqa_core.project import SpecError, load_compiled, read_compiled
 
 from packages.core.tests.test_compiled import data_models_example
 
@@ -46,6 +46,34 @@ def problems(tmp_path: Path, text: str, config: ProjectConfig) -> tuple[str, ...
         refused.value.problems
     )
     return tuple(line.removeprefix(prefix) for line in refused.value.problems)
+
+
+def test_reading_gives_the_script_and_the_bytes_it_read_mark_and_all(
+    tmp_path: Path,
+) -> None:
+    path = write(tmp_path, "")
+    raw = b"\xef\xbb\xbf" + data_models_example().replace("\n", "\r\n").encode()
+    path.write_bytes(raw)
+
+    script, read = read_compiled(path, DECLARES_TEST_PASSWORD)
+
+    assert read == raw
+    assert script == load_compiled(path, DECLARES_TEST_PASSWORD)
+
+
+def test_reading_a_directory_or_text_that_isnt_utf8_is_a_spec_error(
+    tmp_path: Path,
+) -> None:
+    latin = write(tmp_path, "")
+    latin.write_bytes(b'{"name": "caf\xe9"}')
+
+    with pytest.raises(SpecError) as not_text:
+        read_compiled(latin, DECLARES_TEST_PASSWORD)
+    with pytest.raises(SpecError) as directory:
+        read_compiled(tmp_path, DECLARES_TEST_PASSWORD)
+
+    assert not_text.value.problems == (f"{latin}: not UTF-8 text",)
+    assert directory.value.problems == (f"{tmp_path}: a directory, not a file",)
 
 
 def test_the_data_model_example_loads_with_its_compiled_at_string(

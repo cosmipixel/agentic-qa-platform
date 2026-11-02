@@ -120,13 +120,19 @@ class SecretBinding(StrictModel):
 
 
 class Budgets(StrictModel):
-    """Per explore run; exceeding one is `gave_up` (ADR-0024)."""
+    """Per explore run, exceeding one being `gave_up` (ADR-0024), but for the
+    `heal_` keys: per `aqa run` of a spec, across all its drifts, a turn being
+    one model call, and spend checked after each priced response, so a run can
+    spend up to `heal_model_usd` and one call's responses (ADR-0024's #244
+    amendment)."""
 
     attempts: _PositiveCount = 3
     actions_per_attempt: _PositiveCount = 40
     model_usd: PositiveNumber = 3
     minutes: PositiveNumber = 15
     resolve_seconds: PositiveNumber = 10
+    heal_turns: _PositiveCount = 6
+    heal_model_usd: PositiveNumber = 0.30
 
 
 class SubjectContract(StrictModel):

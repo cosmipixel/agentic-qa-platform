@@ -5,7 +5,7 @@ import typing
 from pathlib import Path
 
 import pytest
-from aqa_core.config import RoleField
+from aqa_core.config import Budgets, RoleField
 from aqa_core.project import SpecError, load_config
 from aqa_core.schema import AriaRole, authority
 from pydantic import ValidationError
@@ -74,7 +74,21 @@ def test_every_key_is_optional(tmp_path: Path) -> None:
         "model_usd": 3,
         "minutes": 15,
         "resolve_seconds": 10,
+        "heal_turns": 6,
+        "heal_model_usd": 0.30,
     }
+
+
+def test_heal_budgets_default_to_6_turns_and_030_usd() -> None:
+    assert (Budgets().heal_turns, Budgets().heal_model_usd) == (6, 0.30)
+
+
+def test_a_project_sets_its_heal_budgets(tmp_path: Path) -> None:
+    path = write(tmp_path, "budgets: { heal_turns: 2, heal_model_usd: 0.05 }\n")
+
+    budgets = load_config(path).budgets
+
+    assert (budgets.heal_turns, budgets.heal_model_usd) == (2, 0.05)
 
 
 @pytest.mark.parametrize(
@@ -306,6 +320,24 @@ def test_authority_refuses_what_is_not_an_origin(text: str) -> None:
         ("budgets: { attempts: true }\n", "budgets.attempts", "valid integer"),
         ("budgets: { attempts: '3' }\n", "budgets.attempts", "valid integer"),
         ("budgets: { model_usd: .nan }\n", "budgets.model_usd", "valid number"),
+        ("budgets: { heal_turns: 0 }\n", "budgets.heal_turns", "greater than 0"),
+        ("budgets: { heal_turns: -1 }\n", "budgets.heal_turns", "greater than 0"),
+        ("budgets: { heal_turns: true }\n", "budgets.heal_turns", "valid integer"),
+        (
+            "budgets: { heal_model_usd: 0 }\n",
+            "budgets.heal_model_usd",
+            "greater than 0",
+        ),
+        (
+            "budgets: { heal_model_usd: -0.1 }\n",
+            "budgets.heal_model_usd",
+            "greater than 0",
+        ),
+        (
+            "budgets: { heal_model_usd: true }\n",
+            "budgets.heal_model_usd",
+            "valid number",
+        ),
         # Browser settings, as BrowserSettings validates them.
         (
             "browser: { viewport: [0, 800] }\n",

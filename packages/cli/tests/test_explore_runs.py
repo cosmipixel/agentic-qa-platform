@@ -342,6 +342,22 @@ def test_a_budget_not_given_keeps_the_configs(
     )
 
 
+@pytest.mark.parametrize("override", ["heal_turns=1", "heal_model_usd=0.1"])
+def test_explore_refuses_a_heal_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, override: str
+) -> None:
+    spec = shop(tmp_path / "qa")
+    args = [str(spec), "--url", "http://127.0.0.1:4100", "--budget", override]
+
+    result = unlaunched(monkeypatch, args)
+
+    assert result.exit_code == 5
+    assert (
+        "--budget: give NAME=VALUE, NAME one of attempts, actions_per_attempt, "
+        "model_usd, minutes, resolve_seconds"
+    ) in result.stderr
+
+
 def test_a_navigator_refusal_with_no_fallback_gives_up_with_exit_3(
     app: App, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

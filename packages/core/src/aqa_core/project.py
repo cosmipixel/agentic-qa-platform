@@ -622,7 +622,22 @@ def load_compiled(path: Path, config: ProjectConfig) -> CompiledScript:
     in JSON mode, where `compiled_at` may be a string, then its parts checked
     against each other and the secrets `config` declares. Every problem is
     reported at once, as a SpecError."""
-    return parse_compiled(_read_text(path), config, source=path)
+    return read_compiled(path, config)[0]
+
+
+def read_compiled(path: Path, config: ProjectConfig) -> tuple[CompiledScript, bytes]:
+    """`load_compiled`'s script, and the bytes of the one read it came from, a
+    byte order mark included: what a heal proposal's blob SHA is taken over
+    (`heal_patch.blob_sha`), so the two can't differ."""
+    try:
+        raw = path.read_bytes()
+    except IsADirectoryError:
+        raise SpecError([f"{path}: a directory, not a file"]) from None
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise SpecError([f"{path}: not UTF-8 text"]) from None
+    return parse_compiled(text, config, source=path), raw
 
 
 def parse_compiled(text: str, config: ProjectConfig, *, source: Path) -> CompiledScript:
@@ -674,9 +689,11 @@ def with_budgets(config: ProjectConfig, overrides: Sequence[str]) -> ProjectConf
     budgets, the value read as JSON, or as text when it isn't JSON, and
     checked as the config file's are (DATA_MODEL §9). Each problem names the
     budget and the rule, never what was given: an override that isn't
-    NAME=VALUE with a budget's name, a name given twice, or a value the
-    config file couldn't hold."""
-    names = config.budgets.model_dump()
+    NAME=VALUE with an explore budget's name, a name given twice, or a value
+    the config file couldn't hold. A heal budget's name is no such name:
+    explore would take it and do nothing with it."""
+    budgets = config.budgets.model_dump()
+    names = [name for name in budgets if not name.startswith("heal_")]
     given: dict[str, object] = {}
     problems: list[str] = []
     for override in overrides:
@@ -694,7 +711,7 @@ def with_budgets(config: ProjectConfig, overrides: Sequence[str]) -> ProjectConf
                 given[name] = value
     if problems:
         raise SpecError(list(dict.fromkeys(problems)))
-    laid = _validate(Budgets, names | given, Path("--budget"))
+    laid = _validate(Budgets, budgets | given, Path("--budget"))
     return config.model_copy(update={"budgets": laid})
 
 
