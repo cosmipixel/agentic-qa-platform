@@ -199,7 +199,7 @@ def _checked(spec_id: str, held: object, proposal: str) -> HealProposal:
 @dataclass(frozen=True)
 class Patched:
     """What a proposal makes of a compiled script: the script, the text to write,
-    and whether that text changes whitespace outside the patch."""
+    and whether that text changes formatting outside the patch."""
 
     script: CompiledScript
     text: str

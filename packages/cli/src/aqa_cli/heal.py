@@ -28,7 +28,7 @@ _STALE: Final = (
     "applied: run aqa run again"
 )
 _REFORMATTED: Final = (
-    "  the compiled script wasn't in the form aqa writes, so its whitespace changed too"
+    "  the compiled script wasn't in the form aqa writes, so its formatting changed too"
 )
 
 
@@ -78,6 +78,10 @@ def _spec_root_above(directory: Path) -> Path:
 
 
 def _apply(proposal: str) -> None:
+    """Write the proposal `proposal` names to its spec's compiled script, or stop at
+    the first refusal (API.md §7). `Publication.found` comes before the read, so a
+    file changed at any point after it is refused under the lock. No test secret is
+    bound, so what's printed is escaped and not scanned (`common.rendered`)."""
     if _PROPOSAL_ID.fullmatch(proposal) is None:
         raise typer.BadParameter(
             "a proposal's id is ah_ and 12 lowercase hex digits",
