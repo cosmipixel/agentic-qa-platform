@@ -4,22 +4,25 @@ the proposal. Records and redactors are real, results are made by hand, and ever
 expected value is a literal. `test_heal_verdicts.py` holds what a real heal
 leaves."""
 
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
-from aqa_core.compiled import Target, VisibleUnoccluded
+from aqa_core.compiled import NotVisible, Select, Target, VisibleUnoccluded
 from aqa_runner.evaluation import AssertionResult
 from aqa_runner.executor import RunResult, StepResult
 from aqa_runner.redaction import NO_SECRETS
-from aqa_runner.repairs import AssertionAt, Basis, Repaired
+from aqa_runner.repairs import AssertionAt, Basis, Repaired, StepAt
 from aqa_runner.replay_result import ReplayEnd, Stop, unrecorded
 
 from packages.runner.tests.test_replay_result import (
     BLOB,
     BOUND_AS,
     CLEAN,
+    CLICK,
+    EVENT,
     MISSED,
     NEW_SAVE,
     REPORTED,
@@ -228,6 +231,115 @@ def test_a_drifted_check_with_a_healed_steps_label_cites_no_repair_of_the_step(
     assert entry["heal"] is None
 
 
+def test_a_failed_step_on_a_rebound_target_keeps_its_own_reason(tmp_path: Path) -> None:
+    run = made(tmp_path)
+    failed = StepResult(1, "failed", error="the page crashed")
+
+    healed = ending(run, **healing_the_step(run))
+    end = replace(
+        healed,
+        result=replace(
+            cast_result(healed),
+            steps=(StepResult(0, "completed"), failed),
+            assertions=(),
+        ),
+    )
+
+    entry = judged(end, "step", 1)
+    assert (entry["verdict"], entry["reason"]) == ("inconclusive", "the page crashed")
+    assert entry["heal"] == HEAL_CITED
+
+
+def a_side_effect_left_open(run: Made) -> dict[str, Any]:
+    """An intent nothing resolved, in a run whose every verdict passes."""
+    run.record.step_intent(2, CLICK, side_effect=True, target_used="save")
+    return {}
+
+
+@pytest.mark.parametrize(
+    ("trouble", "outcome"),
+    [
+        pytest.param(
+            lambda _: {"infrastructure_events": (EVENT,)},
+            "unreachable",
+            id="an_infrastructure_event",
+        ),
+        pytest.param(
+            a_side_effect_left_open, "non_resumable", id="a_non_resumable_step"
+        ),
+        pytest.param(
+            lambda _: {"stops": (Stop("no_response", NO_SECRETS.redact(SILENT)),)},
+            "no_response",
+            id="a_stop",
+        ),
+    ],
+)
+def test_a_healed_run_that_was_also_troubled_has_no_drift_consistent_subject(
+    tmp_path: Path, trouble: Callable[[Made], dict[str, Any]], outcome: str
+) -> None:
+    run = made(tmp_path)
+
+    end = passing_with(run, **healing_the_step(run), **trouble(run))
+
+    written = document(end)
+    assert (written["outcome"], written["heal_proposal"]) == (outcome, None)
+    assert judged(end, "step", 1)["verdict"] == "inconclusive"
+    assert judged(end, "step", 1)["reason"] == (
+        "heal rebound its target, but the run didn't pass"
+    )
+    assert judged(end, "step", 1)["heal"] == HEAL_CITED
+    assert judged(end, "assertion", "a4")["verdict"] == "pass"
+    assert judged(end, "assertion", "a4")["heal"] == HEAL_CITED
+
+
+def test_a_select_step_on_a_rebound_target_is_marked_and_cites_the_heal(
+    tmp_path: Path,
+) -> None:
+    run = made(tmp_path)
+    select = Select.model_validate(
+        {
+            "seq": 1,
+            "action": "select",
+            "target": "save",
+            "option": "x",
+            "side_effect": False,
+        }
+    )
+    run = replace(run, script=run.script.model_copy(update={"steps": (select,)}))
+    taken = Repaired(
+        StepAt(select),
+        MISSED,
+        (),
+        rebinding(run.script, save=NEW_SAVE),
+        Basis(BOUND_AS, REPORTED, None, "heals/1"),
+    )
+
+    end = passing_with(run, repairs=(taken,), base=BLOB)
+
+    assert judged(end, "step", 1)["verdict"] == "drift_consistent"
+    assert judged(end, "step", 1)["heal"] == HEAL_CITED
+
+
+def test_a_not_visible_check_on_a_rebound_target_is_marked_and_cites_the_heal(
+    tmp_path: Path,
+) -> None:
+    run = made(tmp_path)
+    gone = NotVisible.model_validate(
+        {"id": "a5", "expect_index": 0, "check": "not_visible", "target": "save"}
+    )
+    update = {"assertions": [*run.script.assertions, gone]}
+    run = replace(run, script=run.script.model_copy(update=update))
+
+    end = ending(
+        run,
+        assertions=(AssertionResult("a5", "pass"),),
+        **healing_the_step(run),
+    )
+
+    assert judged(end, "assertion", "a5")["verdict"] == "drift_consistent"
+    assert judged(end, "assertion", "a5")["heal"] == HEAL_CITED
+
+
 def repaired_step(run: Made, **changes: Any) -> Repaired:
     fields: dict[str, Any] = {
         "at": the_click(run.script),
@@ -407,7 +519,11 @@ def test_a_no_response_stop_keeps_the_verdicts(tmp_path: Path) -> None:
 
     assert (written["outcome"], written["exit_code"]) == ("no_response", 11)
     assert written["reasons"] == [SILENT]
-    assert written["verdicts"] != []
+    assert [
+        next(entry[key] for key in ("step", "assertion", "invariant") if key in entry)
+        for entry in written["verdicts"]
+    ] == [0, 1, "a1", "console_errors", "js_exceptions", "http_5xx", "broken_images"]
+    assert {entry["verdict"] for entry in written["verdicts"]} == {"pass"}
 
 
 def test_a_run_that_heals_and_raised_proposes_nothing(tmp_path: Path) -> None:
