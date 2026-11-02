@@ -374,6 +374,7 @@ async def _replayed(
                 setup.config,
                 setup.spec,
                 session,
+                interrupted,
             )
         )
         pending, in_use = list(runnable), script
