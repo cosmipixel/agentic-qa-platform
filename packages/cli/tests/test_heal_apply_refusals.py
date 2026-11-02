@@ -27,6 +27,7 @@ from packages.runner.tests.drift_fixtures import SHIPPING
 EDITED = "the proposal doesn't match its id, so it was edited after its run"
 NOT_ONE = "the proposal isn't one aqa run writes"
 OUTSIDE = "a heal changes nothing but target locators and inserted steps"
+A_LOCATOR = [{"css": "#moved"}]
 A_SIDE_EFFECT = {
     "seq": 9,
     "action": "click",
@@ -155,10 +156,11 @@ def test_edited_fields_outside_the_id_are_refused(
 @pytest.mark.parametrize(
     "change",
     [
-        {"op": "remove", "path": "/targets/toggle/locators"},
-        {"op": "move", "path": "/targets/toggle/locators", "from": "/steps"},
-        {"op": "copy", "path": "/targets/toggle/locators", "from": "/steps"},
-        {"op": "test", "path": "/targets/toggle/locators", "value": []},
+        # A value and no `from`, so each is refused by its op alone.
+        {"op": "remove", "path": "/targets/toggle/locators", "value": A_LOCATOR},
+        {"op": "move", "path": "/targets/toggle/locators", "value": A_LOCATOR},
+        {"op": "copy", "path": "/targets/toggle/locators", "value": A_LOCATOR},
+        {"op": "test", "path": "/targets/toggle/locators", "value": A_LOCATOR},
         {"op": "replace", "path": "/targets/toggle/locators"},
         {"op": "replace", "path": "/targets/toggle/locators", "value": [], "from": "/"},
         {"op": "replace", "path": 7, "value": []},

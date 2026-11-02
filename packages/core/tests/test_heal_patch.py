@@ -754,11 +754,11 @@ def test_apply_patch_replaces_a_member_or_an_item_where_it_stands() -> None:
 
 
 def test_apply_patch_adds_a_member_after_the_others() -> None:
-    document = {"targets": {"a": 1, "b": 2}}
+    document = {"targets": {"b": 1, "a": 2}}
 
     apply_patch(document, ops({"op": "add", "path": "/targets/c", "value": 3}))
 
-    assert list(document["targets"].items()) == [("a", 1), ("b", 2), ("c", 3)]
+    assert list(document["targets"].items()) == [("b", 1), ("a", 2), ("c", 3)]
 
 
 def test_apply_patch_reads_each_path_against_what_the_last_change_left() -> None:
@@ -794,14 +794,18 @@ def test_apply_patch_reads_a_pointer_as_rfc_6901() -> None:
     ("op", "path"),
     [
         ("replace", ""),
+        ("add", ""),
         ("replace", "targets/a"),
+        ("add", "xtargets/b"),
         ("replace", "/missing"),
         ("replace", "/missing/deeper"),
         ("add", "/missing/deeper"),
         ("replace", "/targets/a/deeper"),
         ("add", "/targets/a/deeper"),
         ("replace", "/targets/~2"),
+        ("add", "/targets/~2"),
         ("replace", "/targets/~"),
+        ("add", "/targets/~"),
         ("replace", "/steps/-1"),
         ("add", "/steps/-1"),
         ("add", "/steps/+1"),
@@ -812,6 +816,7 @@ def test_apply_patch_reads_a_pointer_as_rfc_6901() -> None:
         ("add", "/steps/one"),
         ("add", "/steps/3"),
         ("replace", "/steps/2"),
+        ("replace", "/steps/2/deeper"),
         ("replace", "/steps/-"),
         ("add", "/steps/-/deeper"),
         ("add", f"/steps/{'9' * 5000}"),
