@@ -327,9 +327,10 @@ _BARE_TILDE: Final = re.compile(r"~(?![01])")
 
 
 class PatchOp(StrictModel):
-    """One change a proposal asks for: RFC 6902's `add` and `replace`, the two a
-    heal writes. A proposal file is untrusted input, so `remove`, `move`, `copy`,
-    `test` and any other member are refused rather than ignored."""
+    """One change a proposal asks for: RFC 6902's `add` and `replace`. A heal writes
+    only `replace` until #246 gives `add` a producer. A proposal file is untrusted
+    input, so `remove`, `move`, `copy`, `test` and any other member are refused
+    rather than ignored."""
 
     op: Literal["add", "replace"]
     path: StrictStr
