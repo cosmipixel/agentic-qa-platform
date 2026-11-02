@@ -28,6 +28,7 @@ from packages.runner.tests.test_replay_repairs import (
     rebound,
     repairing,
     repairs,
+    seen_on,
 )
 
 
@@ -55,18 +56,6 @@ def test_a_drifted_assertion_target_goes_to_the_repair_and_is_evaluated_again(
         "misses": ["not unanimous", "no match"],
         "problems": [],
         "script": rebound(run.committed).model_dump(mode="json", exclude_none=True),
-    }
-
-
-def seen_on(target: str, check_id: str) -> dict[str, object]:
-    """A `visible_unoccluded` check of `target`, with the id `check_id`."""
-    return {
-        "id": check_id,
-        "expect_index": 0,
-        "check": "visible_unoccluded",
-        "target": target,
-        "min_size_px": [1, 1],
-        "in_viewport": True,
     }
 
 

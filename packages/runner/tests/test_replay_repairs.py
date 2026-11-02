@@ -411,6 +411,109 @@ def test_a_later_repair_that_rewrites_an_inserted_step_that_ran_is_refused(
     ]
 
 
+def seen_on(target: str, check_id: str) -> dict[str, object]:
+    """A `visible_unoccluded` check of `target`, with the id `check_id`."""
+    return {
+        "id": check_id,
+        "expect_index": 0,
+        "check": "visible_unoccluded",
+        "target": target,
+        "min_size_px": [1, 1],
+        "in_viewport": True,
+    }
+
+
+# The order page, whose toggle renames itself once it is clicked.
+RENAMES_ITSELF = page("order").replace(
+    "document.querySelector('#details').hidden = false",
+    "this.textContent = 'Hide details'",
+)
+CLICK_TOGGLE = {"seq": 1, "action": "click", "target": "toggle", "side_effect": False}
+# The toggle clicked, then seen under the name it no longer has.
+CLICKED_THEN_SEEN = fx.compiled(
+    [CLICK_TOGGLE],
+    targets={"toggle": TOGGLE},
+    assertions=[seen_on("toggle", "a1")],
+)
+# The toggle clicked twice: the second click looks for that name too.
+CLICKED_TWICE = fx.compiled(
+    [CLICK_TOGGLE, {**CLICK_TOGGLE, "seq": 2}], targets={"toggle": TOGGLE}
+)
+RENAMED: tuple[Miss, ...] = ("no match", "not unanimous")
+NO_REPAIR = (
+    "/targets/toggle: a step that already ran acted through this target, so it "
+    "goes to no repair"
+)
+
+
+@pytest.mark.parametrize(
+    ("script", "key", "subject"),
+    [
+        pytest.param(
+            CLICKED_THEN_SEEN, "assertion-0", {"assertion": "a1"}, id="assertion"
+        ),
+        pytest.param(CLICKED_TWICE, "2", {"seq": 2}, id="step"),
+    ],
+)
+def test_a_drift_on_a_target_a_step_already_used_goes_to_no_repair(
+    tmp_path: Path, script: CompiledScript, key: str, subject: dict[str, object]
+) -> None:
+    run = repairing(
+        tmp_path,
+        lambda drift: rebound(drift.script),
+        script=script,
+        html=RENAMES_ITSELF,
+    )
+
+    assert run.handed == []
+    assert repairs(run) == [(key, RENAMED, (NO_REPAIR,), None)]
+    assert document(run, key) == {
+        **subject,
+        "misses": ["no match", "not unanimous"],
+        "problems": [NO_REPAIR],
+        "script": None,
+    }
+
+
+# The toggle clicked, then the footer's contact button, which drifts, seen.
+CLICKED_THEN_CONTACT_SEEN = fx.compiled(
+    [CLICK_TOGGLE],
+    targets={"toggle": TOGGLE, "contact": CONTACT},
+    assertions=[seen_on("contact", "a1")],
+)
+
+
+def rebinding_the_used_toggle_too(drift: Drift) -> CompiledScript:
+    """For the toggle, the script `drift` handed over, rebound; for the
+    contact button, rebound with the toggle, which then has run, bound again."""
+    if isinstance(drift.at, StepAt) and drift.at.step.target == "toggle":
+        return rebound(drift.script)
+    again = rebinding_each(drift)
+    locators = [
+        fx.by_role("button", "Show details"),
+        {"css": "button", "scope": {"css": "main"}},
+    ]
+    return rebound(again, locators=locators)
+
+
+@pytest.mark.parametrize(
+    ("script", "key"),
+    [
+        pytest.param(CLICKED_THEN_CONTACT_SEEN, "assertion-0", id="assertion"),
+        pytest.param(TWO_CLICKS, "2", id="step"),
+    ],
+)
+def test_a_repair_that_rebinds_another_target_a_step_already_used_is_refused(
+    tmp_path: Path, script: CompiledScript, key: str
+) -> None:
+    run = repairing(tmp_path, rebinding_the_used_toggle_too, script=script)
+
+    problem = "/targets/toggle: a repair rebinds no target a step that already ran acted through"
+    assert repairs(run)[-1] == (key, ("no match",), (problem,), None)
+    assert [step.outcome for step in run.result.steps][:2] == ["completed", "completed"]
+    assert run.result.outcome == "failed"
+
+
 # The toggle bound where the moved page has it and clicked, then filled,
 # which a button refuses.
 CLICKED_THEN_FILLED = DETAILS.model_copy(
