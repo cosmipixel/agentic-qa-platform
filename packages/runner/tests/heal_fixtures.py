@@ -1,7 +1,8 @@
 """Fixtures the heal's tests share (#244): a run of `Healing` on a scripted model
-through `replays.replay_run`, in real Chromium against #240's drift pages, and
-what the model's moves look like. Imported by its path, as pytest names the
-runner's test modules (TESTING.md §1, Shared egress fixtures)."""
+through `replays.replay_run`, in real Chromium against #240's drift pages, what
+the model's moves look like, and the recorder's heal cases, each one `aqa run`
+of a drift page (TESTING §4). Imported by its path, as pytest names the runner's
+test modules (TESTING.md §1, Shared egress fixtures)."""
 
 import asyncio
 import json
@@ -13,7 +14,9 @@ from pathlib import Path
 from typing import Any
 
 from aqa_core.compiled import CompiledScript
+from aqa_core.heal_patch import blob_sha
 from aqa_core.project import contracts_fingerprint, load_config, load_spec
+from aqa_core.spec import Spec
 from aqa_runner.admission import admitted
 from aqa_runner.egress_proxy import EgressProxy
 from aqa_runner.executor import RunResult
@@ -21,17 +24,21 @@ from aqa_runner.heal import Healing
 from aqa_runner.locator_generation import register_identity_engine
 from aqa_runner.model_router import ModelRouter
 from aqa_runner.model_turns import Spending
-from aqa_runner.redaction import Redactor
-from aqa_runner.repairs import Basis, Drift, Offer
+from aqa_runner.publication import published_text
+from aqa_runner.redaction import NO_SECRETS, Redactor
+from aqa_runner.repairs import Basis, Drift, Offer, Repair
 from aqa_runner.replay_result import ReplayEnd, present
 from aqa_runner.replays import Opened, Replaying, replay_run
 from aqa_runner.run_record import RunRecord
+from aqa_runner.strict_replay import Replayed, StrictRun, strict_replay
 from langchain_core.messages import AIMessage, BaseMessage
 from playwright.async_api import async_playwright
 
 from packages.runner.tests import executor_fixtures as fx
 from packages.runner.tests.drift_fixtures import (
+    BUTTON,
     DETAILS,
+    IN_VIEW,
     SHIPPING,
     order_spec,
     page,
@@ -201,3 +208,82 @@ def basis(run: Healed, index: int = 0) -> Basis:
 def turn_files(run: Healed, key: str = "1") -> list[str]:
     folder = run.record / f"heals/{key}"
     return sorted(path.name for path in folder.glob("[0-9]*.json"))
+
+
+# The recording's bounds (ADR-0024's #244 amendment): a drift's one healer
+# response, a turn or two to spare, and less than a round's limit a run.
+RECORDING_CONFIG = (
+    "budgets: { resolve_seconds: 2, heal_turns: 3, heal_model_usd: 0.10 }\n"
+)
+MOVED_LOCATORS: list[dict[str, Any]] = [
+    {"role": "button", "name": "Show details"},
+    {"css": "button", "scope": {"css": "#order"}},
+]
+RENAMED_LOCATORS: list[dict[str, Any]] = [
+    {"role": "button", "name": "View details"},
+    {"css": "button", "scope": {"css": "#toolbar"}},
+]
+
+
+@dataclass(frozen=True)
+class HealCase:
+    """One recording: its cassette, the script and the expectation it is compiled
+    from, the page it drifts on, and the locators its proposal must bind."""
+
+    cassette: str
+    script: CompiledScript
+    expectation: str
+    html: str
+    locators: list[dict[str, Any]]
+
+
+HEAL_CASES = (
+    HealCase("heal_moved", DETAILS, SHIPPING, MOVED, MOVED_LOCATORS),
+    HealCase("heal_renamed", DETAILS, SHIPPING, page("renamed"), RENAMED_LOCATORS),
+    HealCase("heal_moved_assertion", BUTTON, IN_VIEW, MOVED, MOVED_LOCATORS),
+    HealCase(
+        "heal_renamed_assertion", BUTTON, IN_VIEW, page("renamed"), RENAMED_LOCATORS
+    ),
+)
+
+
+def heal_spec(case: HealCase, root: Path) -> Spec:
+    """`case`'s spec under the spec root `root`, with the recording's config."""
+    path = order_spec(root, case.expectation)
+    (root / "config.yaml").write_text(RECORDING_CONFIG)
+    return load_spec(path, load_config(root / "config.yaml"))
+
+
+def heal_disallowed(case: HealCase, replayed: Replayed) -> str | None:
+    """Why `replayed` isn't what `case` records, in fixed words, or None."""
+    proposal = replayed.document.get("heal_proposal")
+    if not isinstance(proposal, dict):
+        return f"it ended {replayed.outcome}, which this case doesn't allow"
+    [change] = proposal["patch"]
+    if change["value"] != case.locators:
+        return "its proposal binds another element than this case's"
+    return None
+
+
+async def heal_recorded(
+    case: HealCase, spec: Spec, router: ModelRouter
+) -> tuple[Replayed, str | None]:
+    """`case`'s `aqa run` with `router`, in real Chromium against the fixture app
+    serving its page: how it ended, and why that isn't what `case` records."""
+    root = spec.path.parent
+    config = load_config(root / "config.yaml")
+    script = fx.for_spec(case.script, spec)
+
+    def heal(spending: Spending) -> Repair:
+        budgets = config.budgets
+        return Healing(
+            router, spending, budgets.heal_turns, budgets.resolve_seconds
+        ).repair
+
+    with serving(case.html) as app:
+        blob = blob_sha(published_text(script).encode())
+        run = StrictRun(root, spec, config, app.origin, script, {}, blob)
+        async with async_playwright() as playwright:
+            await register_identity_engine(playwright)
+            replayed = await strict_replay(run, playwright, NO_SECRETS, heal=heal)
+    return replayed, heal_disallowed(case, replayed)
