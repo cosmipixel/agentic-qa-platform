@@ -14,16 +14,13 @@ refused call `REPEATS` times in a row (ADR-0024's #232 amendment)."""
 import hashlib
 import json
 import re
-from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from decimal import MAX_PREC, Decimal, localcontext
 from typing import Final, TypedDict
 
 from aqa_core.compiled import CompiledScript
 from aqa_core.compiler import Provenance
-from aqa_core.model_costs import CostRecord
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import BaseMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
@@ -36,7 +33,16 @@ from aqa_runner.executor import StepResult
 from aqa_runner.explore_attempts import Attempts
 from aqa_runner.explore_result import Stop
 from aqa_runner.locator_generation import snapshot_elements
-from aqa_runner.model_router import ModelCallError, ModelRouter, Routed, Spend
+from aqa_runner.model_router import ModelCallError, ModelRouter, Routed
+from aqa_runner.model_turns import (
+    OVER,
+    UNRECORDED,
+    UNSENT,
+    Spending,
+    UnsentRequestError,
+    no_response,
+    unspelled,
+)
 from aqa_runner.navigator import (
     AssertCheck,
     Decision,
@@ -57,54 +63,18 @@ from aqa_runner.navigator_tools import TOOL_NAMES, Action, Attempt
 from aqa_runner.reasons import UnansweredError
 from aqa_runner.redaction import Redacted, Redactor
 from aqa_runner.run_record import (
-    COSTS,
     RefusedWriteError,
-    RunRecord,
     UnrecordedCostError,
     require_clean,
 )
 
-# Why a turn's call didn't run: its response cost more than was left.
-_OVER: Final = "the spend budget ran out on this turn, so its call didn't run"
-
 # Why the turns stopped, in fixed words.
-UNRECORDED: Final = (
-    "a priced model call's cost line isn't on disk, so the run's cost is incomplete"
-)
 UNWRITTEN: Final = "the run record took no more lines, so the attempt stopped"
-UNSENT: Final = (
-    "a request still spelled a bound value after its scans, so it wasn't sent"
-)
 
 # How many times in a row the navigator may make one refused call before
 # its turns stop, and why they stop then (#232).
 REPEATS: Final = 5
 REPEATED: Final = f"the navigator made the same refused call {REPEATS} times in a row"
-
-
-class UnsentRequestError(Exception):
-    """A model request in which the run's scan still finds a bound value:
-    never sent (ADR-0026's #53 P15a amendment)."""
-
-    def __init__(self) -> None:
-        super().__init__(UNSENT)
-
-
-def unspelled(redactor: Redactor) -> Callable[[Sequence[BaseMessage]], None]:
-    """The check a model request of the run passes before it is sent:
-    `UnsentRequestError` when any of its messages still spells a value
-    `redactor` binds, such as one a join at a marker's edge completes: in
-    its text, or in its content and tool calls as JSON, non-ASCII as
-    written, so no other text's escape counts as a spelling."""
-
-    def check(messages: Sequence[BaseMessage]) -> None:
-        for message in messages:
-            calls = message.tool_calls if isinstance(message, AIMessage) else []
-            sent = json.dumps([message.content, calls], ensure_ascii=False)
-            if redactor.finds(message.text) or redactor.finds(sent):
-                raise UnsentRequestError
-
-    return check
 
 
 class Turns(TypedDict):
@@ -122,33 +92,6 @@ class Turns(TypedDict):
     refused: str
     repeats: int
     done: bool
-
-
-@dataclass
-class Spending:
-    """The run's model spend against its budget: each priced response,
-    kept, then written to `costs.jsonl` as its exact line, checked, before
-    any further call (ADR-0007's #53 P3 amendment). A line that isn't
-    written raises `UnrecordedCostError` out of the call."""
-
-    record: RunRecord
-    budget: Decimal
-    calls: list[CostRecord] = field(default_factory=list)
-
-    def priced(self, call: CostRecord) -> None:
-        self.calls.append(call)
-        self.record.cost(call, check=require_clean(self.record.redactor, COSTS))
-
-    @property
-    def left(self) -> Decimal:
-        """What is left of the budget, exactly; below zero once a response
-        cost more than was left."""
-        with localcontext(prec=MAX_PREC):
-            return self.budget - sum((call.cost_usd for call in self.calls), Decimal(0))
-
-    def spend(self) -> Spend:
-        """What the next call may spend: what is left, and no fallback past it."""
-        return Spend(self.priced, self.left)
 
 
 @dataclass
@@ -355,17 +298,12 @@ async def _called(context: Turning, messages: list[BaseMessage]) -> _Reply | Sto
     except UnrecordedCostError:
         return Stop("record_error", context.said(UNRECORDED))
     except (ModelCallError, ProviderError) as error:
-        failed = error.__cause__ if isinstance(error, ModelCallError) else error
-        if not isinstance(failed, ProviderError):
-            raise
-        # The error's class, never the provider's message.
-        why = f"the model gave no response ({type(failed).__name__})"
-        return _Reply(None, Stop("no_response", context.said(why)))
+        return _Reply(None, Stop("no_response", context.said(no_response(error))))
     if routed.outcome == "refusal":
         stop: Stop | None = Stop("gave_up", context.said("the model refused its turn"))
     else:
         over = context.spending.left < 0
-        stop = Stop("gave_up", context.said(_OVER)) if over else None
+        stop = Stop("gave_up", context.said(OVER)) if over else None
     return _Reply(routed, stop)
 
 

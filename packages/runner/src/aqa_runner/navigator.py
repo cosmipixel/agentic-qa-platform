@@ -21,6 +21,7 @@ from pydantic import AfterValidator, StrictInt, StrictStr, ValidationError
 
 from aqa_runner.evaluation import AssertionResult
 from aqa_runner.model_router import Routed
+from aqa_runner.model_turns import block
 from aqa_runner.probes import OFFERED_PATH_CHARS
 from aqa_runner.redaction import Redacted, Redactor
 
@@ -304,13 +305,6 @@ class Turn:
             raise TypeError("a turn's confirmation is the Redacted text feedback gives")
 
 
-def _block(label: str, text: str, redactor: Redactor) -> str:
-    # Scanned before escaping, which could hide a value holding "<", and
-    # after, since "&lt;" could complete one.
-    escaped = redactor.redact(text).replace("<", "&lt;")
-    return f"<{label}>\n{redactor.redact(escaped)}\n</{label}>"
-
-
 def _check_lines(checks: Mapping[str, CheckState]) -> str:
     return "\n".join(
         f"{check_id}: {_STATED[state]}" for check_id, state in checks.items()
@@ -319,7 +313,7 @@ def _check_lines(checks: Mapping[str, CheckState]) -> str:
 
 def _message(redactor: Redactor, *blocks: tuple[str, str]) -> HumanMessage:
     return HumanMessage(
-        content="\n\n".join(_block(label, text, redactor) for label, text in blocks)
+        content="\n\n".join(block(label, text, redactor) for label, text in blocks)
     )
 
 

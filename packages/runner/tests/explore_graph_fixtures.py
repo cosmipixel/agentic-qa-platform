@@ -20,8 +20,9 @@ from aqa_core.coverage_plan import CoveragePlan
 from aqa_core.model_costs import Usage
 from aqa_core.model_roles import RoutedModel
 from aqa_runner.chat_client import ChatClient, Reply
-from aqa_runner.explore_turns import Spending, Turning, take_turns
+from aqa_runner.explore_turns import Turning, take_turns
 from aqa_runner.model_router import ModelRouter
+from aqa_runner.model_turns import Spending
 from aqa_runner.navigator import navigator_prefix
 from aqa_runner.navigator_tools import Attempt
 from langchain_core.messages import AIMessage, BaseMessage

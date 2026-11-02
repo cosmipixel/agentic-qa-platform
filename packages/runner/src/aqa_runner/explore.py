@@ -95,18 +95,16 @@ from aqa_runner.explore_result import (
     final_outcome,
     present,
 )
-from aqa_runner.explore_turns import (
-    UNRECORDED,
-    UNSENT,
-    UNWRITTEN,
-    Spending,
-    Turning,
-    UnsentRequestError,
-    take_turns,
-    unspelled,
-)
+from aqa_runner.explore_turns import UNWRITTEN, Turning, take_turns
 from aqa_runner.locator_generation import register_identity_engine
 from aqa_runner.model_router import ModelCallError, ModelRouter
+from aqa_runner.model_turns import (
+    UNRECORDED,
+    UNSENT,
+    Spending,
+    UnsentRequestError,
+    unspelled,
+)
 from aqa_runner.navigator import navigator_prefix
 from aqa_runner.navigator_tools import Attempt
 from aqa_runner.publication import (
