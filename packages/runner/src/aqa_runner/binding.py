@@ -173,6 +173,18 @@ async def same_element(first: ElementHandle, other: ElementHandle) -> bool:
         await _forget(first, token, sys.exception())
 
 
+async def is_among(found: PlaywrightLocator, element: ElementHandle) -> bool:
+    """Whether `element` is one of those `found` matches: the engine holds it
+    under a fresh token and answers `is:` for each match, in the utility
+    world. The hold is dropped on every exit; a cancellation stays raised."""
+    token = secrets.token_hex(16)
+    try:
+        await _query(element, f"hold:{token}")
+        return await _passes(found, f"is:{token}")
+    finally:
+        await _forget(element, token, sys.exception())
+
+
 async def within(ancestor: ElementHandle, element: ElementHandle) -> bool:
     """Whether `element` is still inside `ancestor`, and `ancestor` still on
     the page, in `element`'s document: the engine holds `ancestor` and

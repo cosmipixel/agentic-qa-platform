@@ -60,14 +60,15 @@ MOVED_TOGGLE = {
 @dataclass(frozen=True)
 class Repairing:
     """A replay with a repair: its result, its record's directory, each drift
-    the repair was handed, and the committed script with its dump from
-    before the run."""
+    the repair was handed, the committed script with its dump from before the
+    run, and each request the app saw."""
 
     result: RunResult
     record: Path
     handed: list[Drift]
     committed: CompiledScript
     before: dict[str, Any]
+    seen: list[tuple[str, str]]
 
 
 def shipping_spec(root: Path) -> Path:
@@ -118,7 +119,7 @@ def repairing(
                 )
 
         result = asyncio.run(scenario())
-    return Repairing(result, record.path, handed, committed, before)
+    return Repairing(result, record.path, handed, committed, before, app.seen)
 
 
 def rebound(script: CompiledScript, **toggle: Any) -> CompiledScript:
