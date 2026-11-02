@@ -44,7 +44,7 @@ from aqa_runner.egress import InfrastructureEvent
 from aqa_runner.egress_proxy import EgressBlocks
 from aqa_runner.evaluation import AssertionResult
 from aqa_runner.executor import RunResult, StepResult
-from aqa_runner.heal_proposal import final_script, proposal_document
+from aqa_runner.heal_proposal import final_script, proposal_document, rebinds
 from aqa_runner.invariants import InvariantResult
 from aqa_runner.locators import Miss
 from aqa_runner.redaction import Redacted, Redactor
@@ -467,7 +467,7 @@ class _Healed:
                 if final.targets[name].locators != target.locators
             ),
             {_subject(repaired): repaired for repaired in result.repairs},
-            _first_to_change(end.script, result.repairs),
+            dict(reversed(list(rebinds(end.script, result.repairs)))),
             targets,
             not (
                 end.stopped_on
@@ -512,22 +512,6 @@ def _subject(repaired: Repaired) -> str:
     """The label of what `repaired` was handed."""
     at = repaired.at
     return f"step {at.step.seq}" if isinstance(at, StepAt) else at.check.id
-
-
-def _first_to_change(
-    committed: CompiledScript, repairs: tuple[Repaired, ...]
-) -> dict[str, Repaired]:
-    """Each target's first taken repair to change its locators."""
-    first: dict[str, Repaired] = {}
-    previous = committed
-    for repaired in repairs:
-        if (script := repaired.script) is None:
-            continue
-        for name, target in script.targets.items():
-            if target.locators != previous.targets[name].locators:
-                first.setdefault(name, repaired)
-        previous = script
-    return first
 
 
 def _why_drifted(repair: Repaired | None) -> str:
