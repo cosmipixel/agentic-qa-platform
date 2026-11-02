@@ -78,6 +78,13 @@ _INTERRUPTED: Final = "the run was interrupted, so the heal stopped"
 _PAGE_LEVEL: Final = frozenset(
     {"region_absent", "region_ambiguous", "part_absent", "part_ambiguous"}
 )
+# What a heal that stopped adds once a pick was outside the subject's region. It
+# may be a subject that moved or only a wrong pick, and telling them apart would
+# take another read of the page, so the words say `if` (#229).
+_OUTSIDE_ITS_REGION: Final = (
+    "the subject contract refused a pick outside its region, "
+    "so if the subject moved, a reviewed config edit is needed"
+)
 # A locator string past this is no stable name: a page can write any id.
 _LONGEST_STRING: Final = 100
 
@@ -141,12 +148,14 @@ class Healing:
 @dataclass
 class _Heal:
     """The graph's context: what the turns on one drift use, never in state, and
-    what they offer, the script handed until a turn decides, which gives up."""
+    what they offer, the script handed until a turn decides, which gives up. It
+    remembers whether a pick was outside the subject's region, for the reason."""
 
     healing: Healing
     drift: Drift
     offer: Offer = field(init=False)
     observed: bool = field(init=False, default=False)
+    outside_region: bool = field(init=False, default=False)
 
     def __post_init__(self) -> None:
         self.offer = Offer(self.drift.script)
@@ -170,7 +179,8 @@ class _Heal:
         return self.redactor.redact(" ".join(scanned.split()), limit=REASON_CHARS)
 
     def gave_up(self, stop: _Stop) -> Offer:
-        said = self.redactor.redact(stop.why)
+        why = f"{stop.why}; {_OUTSIDE_ITS_REGION}" if self.outside_region else stop.why
+        said = self.redactor.redact(why)
         record = self.folder if self.observed else None
         return Offer(self.drift.script, Basis(said, None, stop.run, record))
 
@@ -363,7 +373,7 @@ async def _bound(
             return f"rebind did not run: {refused}"
         locators = await _generated(context, seen)
     except BindingRefusedError as error:
-        return _contract_refused(error)
+        return _contract_refused(context, error)
     except (PolicyEventError, UnansweredError) as error:
         return _Stop(_unlooked(context, error))
     except (RefError, LocatorError, DocumentChangedError, Error) as error:
@@ -371,14 +381,16 @@ async def _bound(
     return _offered(context, call, seen, locators)
 
 
-def _contract_refused(error: BindingRefusedError) -> _Stop | str:
+def _contract_refused(context: _Heal, error: BindingRefusedError) -> _Stop | str:
     """A refused pick's fixed reason code, never the subject check's words,
     which name the navigator's tools."""
     if error.reason in _PAGE_LEVEL:
         return _Stop(
             f"the subject contract refuses this page ({error.reason}); "
-            "heal never changes a contract"
+            "heal never changes a contract, so a reviewed config edit is needed"
         )
+    if error.reason == "outside_region":
+        context.outside_region = True
     return (
         f"rebind did not run: the subject check refused this element ({error.reason})"
     )

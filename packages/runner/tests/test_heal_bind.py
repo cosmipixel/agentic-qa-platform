@@ -428,6 +428,12 @@ def test_a_healer_steered_to_a_writing_decoy_never_triggers_the_write(
     assert ("POST", "/write/delete") not in run.seen
 
 
+OUTSIDE_ITS_REGION = (
+    "the subject contract refused a pick outside its region, "
+    "so if the subject moved, a reviewed config edit is needed"
+)
+
+
 def contract_config(region: str, part: str) -> str:
     return (
         "budgets: { resolve_seconds: 2, heal_turns: 3 }\n"
@@ -450,42 +456,52 @@ def contracted(region: str, part: str) -> CompiledScript:
 
 
 @pytest.mark.parametrize(
-    ("region", "part", "html", "reason"),
+    ("contract", "html", "reason", "miss"),
     [
-        ("div#panel", "p", SHOWN, "region_absent"),
+        (("div#panel", "p"), SHOWN, "region_absent", "no region"),
         (
-            "div.box",
-            "p",
+            ("div.box", "p"),
             SHOWN + '<div class="box"></div><div class="box"></div>',
             "region_ambiguous",
+            "no region",
         ),
-        ("main#order", "em", SHOWN, "part_absent"),
+        (("main#order", "em"), SHOWN, "part_absent", "no match"),
         (
-            "main#order",
-            "p",
+            ("main#order", "p"),
             SHOWN.replace("</section>", "<p>Another</p></section>"),
             "part_ambiguous",
+            "no match",
         ),
     ],
 )
 def test_a_subject_contract_that_refuses_the_page_ends_the_heal_at_once(
-    tmp_path: Path, region: str, part: str, html: str, reason: str
+    tmp_path: Path, contract: tuple[str, str], html: str, reason: str, miss: str
 ) -> None:
     run = healed(
         tmp_path,
         THE_SUMMARY,
         NO_TOOL,
-        script=contracted(region, part),
+        script=contracted(*contract),
         html=html,
-        config=contract_config(region, part),
+        config=contract_config(*contract),
     )
 
     assert len(run.requests()) == 1
-    assert basis(run).said == (
+    said = (
         f"the subject contract refuses this page ({reason}); "
-        "heal never changes a contract"
+        "heal never changes a contract, so a reviewed config edit is needed"
     )
+    assert basis(run).said == said
     assert run.result.repairs[0].script is None
+    written = run.document
+    assert (written["outcome"], written["exit_code"], written["heal_proposal"]) == (
+        "inconclusive",
+        3,
+        None,
+    )
+    assert run.verdict("assertion", "a1")["reason"] == (
+        f"drift: heal gave up: {said} ({miss})"
+    )
 
 
 def test_an_element_outside_the_subjects_region_takes_another_turn(
@@ -504,6 +520,58 @@ def test_an_element_outside_the_subjects_region_takes_another_turn(
     assert (
         "the subject check refused this element (outside_region)" in run.requests()[1]
     )
+    assert basis(run).said == f"{FOUND_NONE}; {OUTSIDE_ITS_REGION}"
+
+
+@pytest.mark.parametrize(
+    ("moves", "why"),
+    [
+        pytest.param((THE_SUMMARY, NO_TOOL), FOUND_NONE, id="then_no_pick"),
+        pytest.param(
+            (THE_SUMMARY, THE_SUMMARY, THE_SUMMARY),
+            "the turn budget (3) ran out",
+            id="until_the_turn_budget",
+        ),
+    ],
+)
+def test_a_pick_outside_the_subjects_region_says_a_config_edit_may_be_needed(
+    tmp_path: Path, moves: tuple[Any, ...], why: str
+) -> None:
+    """The region stands and the subject sits outside it, so no pick binds. It may
+    be a subject that moved, or only a wrong pick, and the reason says so."""
+    run = healed(
+        tmp_path,
+        *moves,
+        script=contracted("header#toolbar", "p"),
+        html=SHOWN.replace('<header id="toolbar">', '<header id="toolbar"><p>Hi</p>'),
+        config=contract_config("header#toolbar", "p"),
+    )
+
+    written = run.document
+    assert (written["outcome"], written["exit_code"], written["heal_proposal"]) == (
+        "inconclusive",
+        3,
+        None,
+    )
+    assert run.verdict("assertion", "a1")["reason"] == (
+        f"drift: heal gave up: {why}; {OUTSIDE_ITS_REGION} (no match)"
+    )
+
+
+def test_a_pick_inside_the_region_that_isnt_the_part_asks_for_no_config_edit(
+    tmp_path: Path,
+) -> None:
+    """The part is there, so nothing says the subject moved: the pick was wrong."""
+    run = healed(
+        tmp_path,
+        THE_SUMMARY,
+        NO_TOOL,
+        script=contracted("main#order", "h1"),
+        html=SHOWN,
+        config=contract_config("main#order", "h1"),
+    )
+
+    assert "the subject check refused this element (not_the_part)" in run.requests()[1]
     assert basis(run).said == FOUND_NONE
 
 
