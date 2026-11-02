@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from aqa_core.compiled import CompiledScript
-from aqa_runner import heal
+from aqa_core.compiled import CompiledScript, Target
+from aqa_runner import heal, locator_generation
 from aqa_runner.browser_session import BrowserSession
 from aqa_runner.chat_client import Reply
 from aqa_runner.document_origins import (
@@ -21,9 +21,11 @@ from aqa_runner.document_origins import (
     PolicyEventError,
 )
 from aqa_runner.locator_generation import Seen, TargetUses, seen_element
+from aqa_runner.locators import Use, resolve
 from aqa_runner.redaction import Redacted
-from aqa_runner.repairs import Drift, rebind_refusal
+from aqa_runner.repairs import Drift
 from langchain_core.messages import BaseMessage
+from playwright.async_api import Page
 
 from packages.runner.tests.drift_fixtures import (
     BUTTON,
@@ -477,13 +479,13 @@ def test_a_page_that_goes_busy_while_a_ref_is_found_ends_the_heal(
 def test_a_page_that_goes_busy_while_the_generator_holds_the_element_ends_the_heal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    async def going_busy(page: Page, target: Target, use: Use) -> Any:
+        # Inside the generator's hold, which lets go with a read a busy page
+        # never answers: a limit that waits for the cancelled look never ends.
+        await page.evaluate(GOES_BUSY)
+        return await resolve(page, target, use)
 
-    async def going_busy(session: BrowserSession, *args: Any, **kwargs: Any) -> Any:
-        refused = await rebind_refusal(session, *args, **kwargs)
-        await session.page.evaluate(GOES_BUSY)
-        return refused
-
-    monkeypatch.setattr(heal, "rebind_refusal", going_busy)
+    monkeypatch.setattr(locator_generation, "resolve", going_busy)
 
     run = healed(tmp_path, SHOW)
 
