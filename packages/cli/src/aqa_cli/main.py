@@ -6,6 +6,7 @@ from typing import Annotated
 import typer
 
 from aqa_cli.explore import explore
+from aqa_cli.heal import heal
 from aqa_cli.replay import replay
 from aqa_cli.run import run
 
@@ -42,3 +43,4 @@ def main(
 app.command()(explore)
 app.command()(replay)
 app.command()(run)
+app.command()(heal)

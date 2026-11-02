@@ -65,16 +65,25 @@ def admitted(
     over a missing value (exit 5 before 12), and a stale script's other
     problems are moot. Public so `aqa replay` admits every spec before any
     run's reset (#239)."""
-    if script.spec_hash != spec.spec_hash:
-        raise SpecError(["compiled from another version of the spec: explore it again"])
-    if problems := contract_problems(script, config):
-        raise SpecError(problems)
-    runnable, checks = accepted(script, spec)
+    runnable, checks = admissible(script, spec, config)
     bound = bound_secrets(spec, start)
     redactor = Redactor(bound.values())
     if problems := _spelling_bound_values(spec, runnable, script.targets, redactor):
         raise BoundValueSpelledError(problems, bound)
     return runnable, checks, bound, redactor
+
+
+def admissible(
+    script: CompiledScript, spec: Spec, config: ProjectConfig
+) -> tuple[list[Targeted | Untargeted], list[Assertion]]:
+    """What `admitted` asks of `script` before any test secret is bound, or
+    `SpecError`: public so `aqa heal apply`, which binds none, leaves a script
+    replay reads as `admitted` does."""
+    if script.spec_hash != spec.spec_hash:
+        raise SpecError(["compiled from another version of the spec: explore it again"])
+    if problems := contract_problems(script, config):
+        raise SpecError(problems)
+    return accepted(script, spec)
 
 
 def _spelling_bound_values(
