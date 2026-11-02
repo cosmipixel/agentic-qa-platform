@@ -14,13 +14,17 @@ from dataclasses import dataclass, replace
 from typing import Literal
 
 from aqa_core.compiled import (
+    Assertion,
     Click,
     CompiledScript,
     Fill,
     FillSecret,
     Navigate,
+    NotVisible,
     Press,
     Reload,
+    TextInTarget,
+    VisibleUnoccluded,
 )
 from aqa_core.config import ProjectConfig
 from aqa_core.project import path_on_origin, start_url
@@ -62,7 +66,7 @@ from aqa_runner.invariants import InvariantResult, invariant_results
 from aqa_runner.locators import Miss, Resolved
 from aqa_runner.reasons import UnansweredError
 from aqa_runner.redaction import Redacted, Redactor
-from aqa_runner.repairs import Handing, Repair, Repaired, StepAt
+from aqa_runner.repairs import AssertionAt, Handing, Repair, Repaired, StepAt
 from aqa_runner.run_record import STEPS, RefusedWriteError, RunRecord, require_clean
 from aqa_runner.secret_fields import SecretRefusedError
 from aqa_runner.settling import Settled, Window
@@ -86,7 +90,7 @@ type ErrorCode = Literal["egress_blocked"]
 class RunSetup:
     """What a replay runs for: the spec and project config, the run's start
     origin (`aqa_core.project.start_origin`), the run's record, and the
-    repair a drifted step goes to, if any (#242)."""
+    repair a drift goes to, if any (#242, #244)."""
 
     spec: Spec
     config: ProjectConfig
@@ -155,8 +159,8 @@ class RunResult:
     and ports in memory: what #53 prints or saves of them is its
     preflight's. `evidence` is the page a failure shows explore's next
     attempt (#56): the step's where an enabled invariant first became
-    violated, else the last step's. `repairs` holds each drifted step's
-    repair, in order: a run that passed through one keeps its outcome."""
+    violated, else the last step's. `repairs` holds each drift's repair, in
+    order: a run that passed through one keeps its outcome."""
 
     run_id: str
     outcome: RunOutcome
@@ -224,11 +228,13 @@ async def replay(
     (`aqa_runner.evidence`).
 
     With `setup.repair`, a step whose target drifted, in a run nothing has
-    interrupted, goes to that repair (`Drift`), once. The script it offers
-    is checked and recorded before the run goes on with it
+    interrupted, goes to that repair (`repairs.Drift`), once. The script it
+    offers is checked and recorded before the run goes on with it
     (`repairs.Handing`), the drifted step first, which keeps no evidence of
     its drift; a refused one, or the script it was handed, ends the run as
-    drift. What the repair raises leaves as any failure here does."""
+    drift. Once every step has completed, a positive check whose target
+    drifted goes to it too (`_evaluated`). What the repair raises leaves as
+    any failure here does."""
     try:
         replayed = await _replayed(
             script, setup, gate, every_locator, chromium=chromium, proxy=proxy
@@ -394,7 +400,9 @@ async def _replayed(
                 for check in checks
             )
         else:
-            assertions = await evaluate_each(session, checks, run.evaluation)
+            assertions = await _evaluated(
+                session, run, checks, handing, in_use, interrupted=interrupted
+            )
         invariants = invariant_results(
             session.invariant_observers.seen, setup.spec.frontmatter.invariants
         )
@@ -413,6 +421,73 @@ async def _replayed(
         evidence,
         () if handing is None else tuple(handing.repaired),
     )
+
+
+async def _evaluated(
+    session: BrowserSession,
+    run: _Replay,
+    checks: list[Assertion],
+    handing: Handing | None,
+    in_use: CompiledScript,
+    *,
+    interrupted: Callable[[], bool],
+) -> tuple[AssertionResult, ...]:
+    """Every assertion's result, each evaluated once (`evaluate_each`), then,
+    with a repair, each drift it takes (ADR-0024's #244 amendment). While
+    nothing interrupted the run, every result is `pass` or
+    `binding_unresolved`, since anything else keeps the run from passing
+    whatever a repair does, and no invariant the spec keeps enabled is
+    violated, the first positive check that drifted goes to the repair, once.
+    Taken, only the checks on the targets whose locators it changed are
+    evaluated again, since time can flip the others' results. Refused or
+    given up, nothing more is handed, and that check stays drifted."""
+    evaluation = run.evaluation
+    results = list(await evaluate_each(session, checks, evaluation))
+    if handing is None:
+        return tuple(results)
+    while (
+        not interrupted()
+        and all(result.outcome in ("pass", "binding_unresolved") for result in results)
+        and not _violated(session, run.setup.spec)
+        and (next_drift := _next_drift(handing, checks, results)) is not None
+    ):
+        repaired = await handing.hand(*next_drift, in_use, in_use.steps)
+        if (patched := repaired.script) is None:
+            break
+        changed = {
+            name
+            for name, target in patched.targets.items()
+            if target.locators != in_use.targets[name].locators
+        }
+        in_use, evaluation = patched, replace(evaluation, targets=patched.targets)
+        again = [
+            index
+            for index, check in enumerate(checks)
+            if isinstance(check, TextInTarget | NotVisible | VisibleUnoccluded)
+            and check.target in changed
+        ]
+        fresh = await evaluate_each(
+            session, [checks[index] for index in again], evaluation
+        )
+        for index, result in zip(again, fresh, strict=True):
+            results[index] = result
+    return tuple(results)
+
+
+def _next_drift(
+    handing: Handing, checks: list[Assertion], results: list[AssertionResult]
+) -> tuple[AssertionAt, tuple[Miss, ...]] | None:
+    """The first positive check whose target drifted and hasn't had its one
+    repair, with its misses. A `not_visible` check's drift goes to none: its
+    element may rightly be gone."""
+    for index, (check, result) in enumerate(zip(checks, results, strict=True)):
+        if result.outcome == "binding_unresolved" and isinstance(
+            check, TextInTarget | VisibleUnoccluded
+        ):
+            at = AssertionAt(index, check)
+            if not handing.handed(at):
+                return at, result.misses
+    return None
 
 
 def _violated(session: BrowserSession, spec: Spec) -> bool:
