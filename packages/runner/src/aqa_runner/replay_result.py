@@ -462,19 +462,23 @@ class _Healed:
     through a target whose locators differ between the committed script and the
     final one, or an assertion of any kind on such a target. `by_subject` is each
     repair by what it was handed, `first` each target's first repair to change
-    it, `targets` what each subject reads, and `untroubled` says nothing stopped,
-    blocked or left unresolved the run."""
+    it, `targets` what each subject reads, `dispatched` each step that completed
+    or whose intent has no completion, so not one refused before dispatch or one
+    that drifted, which write none, and `untroubled` says nothing stopped, blocked
+    or left unresolved the run."""
 
     redactor: Redactor
     rebound: frozenset[str]
     by_subject: Mapping[_Subject, Repaired]
     first: Mapping[str, Repaired]
     targets: Mapping[_Subject, str]
+    dispatched: frozenset[_Subject]
     untroubled: bool
 
     @classmethod
     def of(cls, end: ReplayEnd, result: RunResult) -> _Healed:
         final = final_script(end.script, result.repairs)
+        unresolved = {intent.seq for intent in end.record.unresolved()}
         targets = {
             _Subject("step", step.seq): step.target
             for step in final.steps
@@ -494,6 +498,11 @@ class _Healed:
             {_subject(repaired): repaired for repaired in result.repairs},
             dict(reversed(list(rebinds(end.script, result.repairs)))),
             targets,
+            frozenset(
+                _Subject("step", step.seq)
+                for step in result.steps
+                if step.outcome == "completed" or step.seq in unresolved
+            ),
             not (
                 end.stopped_on
                 or end.blocks.blocked
@@ -506,13 +515,12 @@ class _Healed:
         """`judged`, each ruled on. Only when every one of the run's own verdicts
         passes and nothing troubled it is a subject on the rebound set
         `drift_consistent`; with none on it, the run just passed. Each finding lists
-        the steps on the set."""
+        the steps on the set that reached dispatch."""
         passed = self.untroubled and all(each.verdict == "pass" for each in judged)
         rebound_steps = [
             each.subject.name
             for each in judged
-            if each.subject.kind == "step"
-            and each.drift is None
+            if each.subject in self.dispatched
             and self.targets.get(each.subject) in self.rebound
         ]
         return [

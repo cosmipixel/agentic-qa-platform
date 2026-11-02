@@ -262,6 +262,46 @@ def test_a_step_that_drifted_again_is_not_listed_in_a_finding(tmp_path: Path) ->
     assert entry["finding"]["rebound_steps"] == []
 
 
+def a_rebound_step_that_failed_beside_a_broken_invariant(run: Made) -> ReplayEnd:
+    """Step 1, through `save`, which heal rebound, failed; `console_errors` broke."""
+    healed = ending(run, **healing_the_step(run), **violated("console_errors"))
+    return replace(
+        healed,
+        result=replace(
+            cast_result(healed),
+            steps=(
+                StepResult(0, "completed"),
+                StepResult(1, "failed", error="the page crashed"),
+            ),
+            assertions=(),
+        ),
+    )
+
+
+def test_a_step_refused_before_its_dispatch_is_not_listed_in_a_finding(
+    tmp_path: Path,
+) -> None:
+    """The gate refused it, so it wrote no intent and did nothing: its binding can't
+    be why the invariant failed."""
+    end = a_rebound_step_that_failed_beside_a_broken_invariant(made(tmp_path))
+
+    entry = judged(end, "invariant", "console_errors")
+    assert entry["finding"]["rebound_steps"] == []
+
+
+def test_a_step_that_failed_after_its_dispatch_is_listed_in_a_finding(
+    tmp_path: Path,
+) -> None:
+    """Its intent has no completion, so its action may have taken effect."""
+    run = made(tmp_path)
+    run.record.step_intent(1, CLICK, side_effect=False, target_used="save")
+
+    end = a_rebound_step_that_failed_beside_a_broken_invariant(run)
+
+    entry = judged(end, "invariant", "console_errors")
+    assert entry["finding"]["rebound_steps"] == [1]
+
+
 def with_the_check_on_save_called(run: Made, name: str) -> Made:
     """`run`, whose check a4, the one reading `save`, has the id `name`."""
     checks = [
