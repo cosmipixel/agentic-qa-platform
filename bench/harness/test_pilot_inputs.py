@@ -15,13 +15,12 @@ from unittest.mock import patch
 import pilot_inputs
 from aqa_core.project import contracts_fingerprint, load_project, parse_compiled
 from aqa_core.spec import canonical_hash
-from pilot_inputs import PilotInput, ResetRequest, load_pilots, validate_pilot
+from pilot_inputs import PilotInput, load_pilots, validate_pilot
 from pilot_rebinding import apply_rebinding
 
 ORIGIN, FOREIGN = "http://127.0.0.1:4100", "http://127.0.0.1:4101"
 MISMATCH = "base_url is not the stack's origin"
 EXTRA = "declares an origin beyond the stack's"
-RESET = ResetRequest("http://127.0.0.1:4100/test-api/reset?fixture=seed")
 CONFIG = '{"base_url":"http://127.0.0.1:4100","secrets":{"TEST_PASSWORD":{"origins":["start"],"field":"password"}}}'
 SPEC = '{"id":"pilot","goal":"Read an article","preconditions":{"start_url":"/","reset":{"http":"POST /test-api/reset?fixture=seed"},"probes":{"count":"GET /test-api/count"}},"expect":["Title is visible","Body is visible"],"tags":["articles"]}'
 COMPILED = """{
@@ -336,19 +335,19 @@ class PilotInputTests(unittest.TestCase):
                 self.refuses(self.load, "invalid pilot input", self.qa)
         self.spec = json.loads(SPEC)
         self.save()
-        self.assertEqual(self.load()[0].reset, RESET)
+        self.assertEqual(self.ids(), ("pilot",))
 
     def test_side_effect_requires_reset_even_for_one_future_repeat(self) -> None:
         del self.spec["preconditions"]["reset"]
         self.save()
-        self.assertIsNone(self.memory().reset)
+        self.assertFalse(self.memory().script.steps[-1].side_effect)
         posting = RELOAD | {"side_effect": True, "side_effect_basis": "posts"}
         self.data["steps"].append(posting)
         self.save()
         self.refuses(self.memory, "invalid pilot input")
         self.spec = json.loads(SPEC)
         self.save()
-        self.assertEqual(self.memory().reset, RESET)
+        self.assertTrue(self.memory().script.steps[-1].side_effect)
 
     def test_subject_contracts_agree_as_replay_requires(self) -> None:
         self.data["assertions"][0] = {"id": "a0", "expect_index": 0, **CHECKS[1]}
@@ -543,7 +542,7 @@ class PilotInputTests(unittest.TestCase):
         self.assertEqual(admitted.start, "http://127.0.0.1:4100")
         self.assertNotIn("fake-password-value", repr(admitted))
         names = tuple(field.name for field in fields(admitted))
-        self.assertEqual(names, ("spec", "config", "script", "start", "reset"))
+        self.assertEqual(names, ("spec", "config", "script", "start"))
         for name in names:
             with self.subTest(field=name), self.assertRaises(FrozenInstanceError):
                 setattr(admitted, name, None)
