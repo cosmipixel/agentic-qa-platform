@@ -1237,7 +1237,7 @@ The second half of #244, on the #242 and first #244 amendments' seam. API.md §7
 
 ### The heal round's receipts (recorded 2026-11-02)
 
-Four attempts in one round directory, with the named recorder at `e9631e77`, on the pinned price map `ae6b762`. Model `claude-sonnet-5-5`, effort none, no cached input. Every response was HTTP 200 and priced `ok`, nothing was withheld, and each ended `accepted`, exit 7 `drift_consistent`, on the first request.
+Four attempts in one round directory, with the named recorder at the commit "test(runner): the recorder's cases say what each is recorded as", on the pinned price map `ae6b762`. Model `claude-sonnet-5-5`, effort none, no cached input. Every response was HTTP 200 and priced `ok`, nothing was withheld, and each ended `accepted`, exit 7 `drift_consistent`, on the first request.
 
 | Case | Request ID | Tokens in / out | CostRecord (USD) |
 |---|---|---|---|
