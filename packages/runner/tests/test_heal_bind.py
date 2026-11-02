@@ -25,10 +25,10 @@ from aqa_runner.locators import Use, resolve
 from aqa_runner.redaction import Redacted
 from aqa_runner.repairs import Drift
 from langchain_core.messages import BaseMessage
-from playwright.async_api import Page
+from playwright.async_api import Error, Page
 
 from packages.runner.tests.drift_fixtures import BUTTON, DETAILS, SUMMARY
-from packages.runner.tests.executor_fixtures import compiled
+from packages.runner.tests.executor_fixtures import compiled, read_steps
 from packages.runner.tests.explore_graph_fixtures import calling, ref
 from packages.runner.tests.heal_fixtures import (
     FOUND_NONE,
@@ -259,6 +259,72 @@ def test_an_assertion_targets_rebind_to_another_role_is_refused(tmp_path: Path) 
     assert run.result.repairs[0].script is None
 
 
+# A login's password field: its label is gone, and its css locator still finds
+# what the form holds now, alone, so only the binding can refuse that.
+THE_PASSWORD = compiled(
+    [
+        {
+            "seq": 1,
+            "action": "fill_secret",
+            "target": "field",
+            "secret": "TEST_PASSWORD",
+            "side_effect": True,
+            "side_effect_basis": "network: POST /write/signin",
+        }
+    ],
+    targets={
+        "field": {
+            "semantic": "the login form's password field",
+            "locators": [
+                {"label": "Password"},
+                {"css": "input", "scope": {"css": "#login"}},
+            ],
+        }
+    },
+)
+A_NOTE = (
+    '<form id="login"><input aria-label="Note" '
+    "oninput=\"fetch('/write/typed', {method: 'POST'})\"></form>"
+)
+
+
+def test_a_secret_step_healed_to_a_field_its_binding_refuses_types_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The healer can't read the binding, since the seam holds the secret. So the
+    pick is offered and taken, and the seam refuses it, with no intent."""
+    monkeypatch.setenv("AQA_SECRET_TEST_PASSWORD", OTHER_FAKE_VALUE)
+
+    run = healed(
+        tmp_path,
+        rebinding("textbox", "Note"),
+        script=THE_PASSWORD,
+        spec_at=secret_spec_at,
+        html=in_the_footer(A_NOTE),
+        config=SECRET_CONFIG,
+    )
+
+    field_refused = (
+        'fill_secret refused TEST_PASSWORD: the field isn\'t an <input type="password">'
+    )
+    assert outcomes(run) == [(0, "completed"), (1, "failed")]
+    assert run.result.steps[1].error == field_refused
+    assert [(line["seq"], line["state"]) for line in read_steps(run.record)] == [
+        (0, "intent"),
+        (0, "completed"),
+    ]
+    assert ("POST", "/write/typed") not in run.seen
+    assert len(run.requests()) == 1
+    written = run.document
+    assert (written["outcome"], written["exit_code"]) == ("inconclusive", 3)
+    assert written["heal_proposal"] is None
+    assert run.verdict("step", 1)["verdict"] == "inconclusive"
+    assert run.verdict("step", 1)["reason"] == field_refused
+    assert run.verdict("step", 1)["heal"]["repair"] == "repairs/1.json"
+    files = [path for path in run.record.rglob("*") if path.is_file()]
+    assert copies_found(OTHER_FAKE_VALUE, files=files, texts=run.requests()) == []
+
+
 PLACE = compiled(
     [
         {
@@ -421,6 +487,41 @@ def test_a_page_that_never_stops_changing_takes_another_turn(
     assert len(run.requests()) == 2
     assert "rebind did not run: " in run.requests()[1]
     assert basis(run).said == FOUND_NONE
+
+
+def test_a_page_that_breaks_the_generators_read_takes_another_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def breaking(*_: object) -> int:
+        raise Error("the page broke this read")
+
+    monkeypatch.setattr(TargetUses, "add", breaking)
+
+    run = healed(tmp_path, SHOW, NO_TOOL)
+
+    assert len(run.requests()) == 2
+    assert "rebind did not run: Error: the page broke this read" in run.requests()[1]
+    assert basis(run).said == FOUND_NONE
+
+
+def test_a_pick_no_locator_it_may_write_finds_takes_another_turn(
+    tmp_path: Path,
+) -> None:
+    """Its name and its only ancestor's id are past what a heal writes, and a bare
+    `button` finds the footer's too, so every candidate is gone."""
+    name = "Show " + "z" * 100
+    html = MOVED.replace('id="order"', f'id="{"z" * 100}"')
+    html = html.replace("Show details", name)
+
+    run = healed(tmp_path, rebinding("button", name), NO_TOOL, html=html)
+
+    assert len(run.requests()) == 2
+    assert (
+        "rebind did not run: the button that shows the order's details: no locator "
+        "of the grammar finds the button element alone for an action"
+    ) in run.requests()[1]
+    assert basis(run).said == FOUND_NONE
+    assert run.result.repairs[0].script is None
 
 
 def test_a_policy_failure_in_the_bind_gives_up_on_the_record(
