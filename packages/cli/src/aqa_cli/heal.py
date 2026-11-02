@@ -20,6 +20,7 @@ from aqa_cli.common import found_script, say, stop
 from aqa_cli.run import run
 
 _PROPOSAL_ID: Final = re.compile(r"ah_[0-9a-f]{12}")
+_WORDS: Final = "'SPEC | apply PROPOSAL_ID'"
 _NOTHING: Final = "nothing was applied"
 _UNREAD: Final = (
     "the project or its run records could not be read, so nothing was applied"
@@ -62,12 +63,14 @@ def heal(
     match words:
         case ["apply", proposal] if url is None:
             _apply(proposal)
-        case [spec] if spec != "apply":
+        case ["apply"]:
+            raise typer.BadParameter("apply takes a proposal's id", param_hint=_WORDS)
+        case [spec]:
             run([Path(spec)], url=url)
         case _:
             raise typer.BadParameter(
                 "give one spec, or apply and a proposal's id with no --url",
-                param_hint="'SPEC | apply PROPOSAL_ID'",
+                param_hint=_WORDS,
             )
 
 
@@ -108,7 +111,7 @@ def _apply(proposal: str) -> None:
     spec = project.specs.get(spec_id)
     if spec is None:
         stop("spec_error", proposal, _NOTHING, ("it names no spec of this project",))
-    at, script, raw = found_script(root, spec, project.config, NO_SECRETS)
+    at, script, raw = found_script(root, spec, project.config, NO_SECRETS, _NOTHING)
     if blob_sha(raw) != held.base.blob_sha:
         stop("stale", proposal, _STALE)
     try:

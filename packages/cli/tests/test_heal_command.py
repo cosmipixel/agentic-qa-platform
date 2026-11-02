@@ -78,7 +78,7 @@ def test_heal_without_the_providers_key_exits_5(
     [
         pytest.param([], 2, "Missing argument", id="nothing"),
         pytest.param(["a.spec.md", "b.spec.md"], 2, "give one spec", id="two-specs"),
-        pytest.param(["apply"], 2, "give one spec", id="apply-and-no-id"),
+        pytest.param(["apply"], 2, "apply takes a proposal's id", id="apply-and-no-id"),
         pytest.param(
             ["apply", "ah_0123456789ab", "ah_0123456789ac"],
             2,

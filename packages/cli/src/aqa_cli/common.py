@@ -71,8 +71,6 @@ _CLOSED_EARLY: Final = ("Connection closed while reading from the driver",)
 _NO_DRIVER: Final = "the browser driver couldn't start"
 _NOTHING: Final = "nothing was replayed"
 _MISSING: Final = "no compiled script: explore it first"
-_UNREAD: Final = "the compiled script could not be read, so nothing was replayed"
-_UNLOADED: Final = "the compiled script doesn't load, so nothing was replayed"
 _REFUSED: Final = "replay refuses the compiled script, so nothing was replayed"
 
 # Characters that would move the cursor, recolour the terminal or reorder text
@@ -245,7 +243,7 @@ def admitted_runs(paths: Sequence[Path], url: str | None) -> list[StrictRun]:
         except SpecError as error:
             stop("spec_error", str(path), _NOTHING, error.problems, scan=scan)
         spec_id = spec.frontmatter.id
-        _, script, raw = found_script(root, spec, config, scan)
+        _, script, raw = found_script(root, spec, config, scan, _NOTHING)
         try:
             _, _, bound, _ = admitted(script, spec, config, start)
         except BoundValueSpelledError as error:
@@ -264,27 +262,30 @@ def admitted_runs(paths: Sequence[Path], url: str | None) -> list[StrictRun]:
 
 
 def found_script(
-    root: Path, spec: Spec, config: ProjectConfig, scan: Redactor
+    root: Path, spec: Spec, config: ProjectConfig, scan: Redactor, nothing: str
 ) -> tuple[Publication, CompiledScript, bytes]:
     """`spec`'s compiled script, read as explore reads it, where it was found,
     before that read, and the bytes it was read from, or a stop scanned with
-    `scan`: none, a link on the way (`publication`) and one that doesn't load
-    are spec errors, and one that can't be read is 15."""
+    `scan`, saying `nothing` of what the command didn't do: none, a link on the
+    way (`publication`) and one that doesn't load are spec errors, and one that
+    can't be read is 15."""
     spec_id = spec.frontmatter.id
+    unread = f"the compiled script could not be read, so {nothing}"
     try:
         at = publication(root, spec)
     except SpecError as error:
-        stop("spec_error", spec_id, _NOTHING, error.problems, scan=scan)
+        stop("spec_error", spec_id, nothing, error.problems, scan=scan)
     except OSError:
-        stop("record_error", spec_id, _UNREAD, scan=scan)
+        stop("record_error", spec_id, unread, scan=scan)
     if at.found is None:
         stop("spec_error", spec_id, _MISSING, scan=scan)
     try:
         return (at, *read_compiled(at.target, config))
     except OSError:
-        stop("record_error", spec_id, _UNREAD, scan=scan)
+        stop("record_error", spec_id, unread, scan=scan)
     except SpecError as error:
-        stop("spec_error", spec_id, _UNLOADED, error.problems, scan=scan)
+        unloaded = f"the compiled script doesn't load, so {nothing}"
+        stop("spec_error", spec_id, unloaded, error.problems, scan=scan)
 
 
 def scan_of(runs: Sequence[StrictRun], more: Iterable[BoundSecret] = ()) -> Redactor:

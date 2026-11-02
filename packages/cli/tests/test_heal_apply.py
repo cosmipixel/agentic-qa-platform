@@ -669,6 +669,40 @@ def test_a_compiled_script_gone_since_the_run_exits_5(
     assert not target.exists()
 
 
+@pytest.mark.parametrize(
+    ("mode", "code", "said"),
+    [
+        pytest.param(
+            0o644,
+            5,
+            "spec_error order: the compiled script doesn't load, so nothing was "
+            "applied\n",
+            id="that-doesnt-load",
+        ),
+        pytest.param(
+            0o000,
+            15,
+            "record_error order: the compiled script could not be read, so nothing "
+            "was applied\n",
+            id="that-cant-be-read",
+        ),
+    ],
+)
+def test_a_compiled_script_it_cant_use_is_said_in_applys_words(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: int, code: int, said: str
+) -> None:
+    root = tmp_path / "qa"
+    target = committed(root)
+    proposal = recorded(root, REBIND)
+    target.write_text("not json\n")
+    target.chmod(mode)
+
+    result = apply(root, monkeypatch, proposal)
+
+    assert result.exit_code == code, result.output
+    assert result.stderr.startswith(said), result.stderr
+
+
 def test_apply_keeps_a_byte_order_mark(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
