@@ -54,6 +54,33 @@ def test_apply_changes_only_the_paths_it_names(
     assert result.stderr == ""
 
 
+def test_apply_prints_each_path_of_its_patch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "qa"
+    target = committed(root, SAVING)
+    proposal = recorded(
+        root,
+        [
+            *REBIND,
+            {
+                "op": "replace",
+                "path": "/targets/summary/locators",
+                "value": [{"css": "#moved-summary"}],
+            },
+        ],
+    )
+
+    result = apply(root, monkeypatch, proposal)
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == (
+        f"applied {proposal} order: {target}\n"
+        "  /targets/toggle/locators\n"
+        "  /targets/summary/locators\n"
+    )
+
+
 def test_two_runs_that_made_one_proposal_apply_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -69,13 +96,16 @@ def test_two_runs_that_made_one_proposal_apply_it(
     assert target.read_text() == before.replace(LOCATORS, MOVED_LOCATORS)
 
 
-def test_two_records_that_differ_under_one_id_are_refused_and_named(
+def test_records_that_differ_under_one_id_are_refused_and_named_in_order(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The last of three differs, and they are made in reverse, as a file system could
+    list them."""
     root = tmp_path / "qa"
     committed(root)
-    proposal = recorded(root, REBIND, run="first")
-    recorded(root, REBIND, run="second", edit=lambda held: held.update(patch=[]))
+    recorded(root, REBIND, run="zeta", edit=lambda held: held.update(patch=[]))
+    recorded(root, REBIND, run="mid")
+    proposal = recorded(root, REBIND, run="alpha")
     before = files(tmp_path)
 
     result = apply(root, monkeypatch, proposal)
@@ -86,9 +116,31 @@ def test_two_records_that_differ_under_one_id_are_refused_and_named(
         f"spec_error {proposal}: nothing was applied\n"
         "  run records hold different proposals under this id, so at least one "
         "was edited\n"
-        f"  {runs / 'first'}\n"
-        f"  {runs / 'second'}\n"
+        f"  {runs / 'alpha'}\n"
+        f"  {runs / 'mid'}\n"
+        f"  {runs / 'zeta'}\n"
     )
+    assert files(tmp_path) == before
+
+
+def test_records_that_differ_only_in_the_spec_they_name_are_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "qa"
+    committed(root)
+    proposal = recorded(root, REBIND, run="first")
+    runs = root / ".aqa" / "runs"
+    document = json.loads((runs / "first" / "replay.json").read_text())
+    (runs / "second").mkdir()
+    (runs / "second" / "replay.json").write_text(
+        json.dumps({**document, "spec_id": "another"})
+    )
+    before = files(tmp_path)
+
+    result = apply(root, monkeypatch, proposal)
+
+    assert result.exit_code == 5, result.output
+    assert "  run records hold different proposals under this id" in result.stderr
     assert files(tmp_path) == before
 
 
@@ -148,32 +200,34 @@ def test_a_malformed_id_is_a_usage_error(
 
 
 @pytest.mark.parametrize(
-    "broken",
+    ("broken", "mode"),
     [
-        b"not json\n",
-        b"\xff\xfe not utf-8",
-        b"[" * 1_000_000,
-        b"\xef\xbb\xbf{}",
+        (b"not json\n", 0o644),
+        (b"\xff\xfe not utf-8", 0o644),
+        (b"[" * 1_000_000, 0o644),
+        (b"{}", 0o000),
     ],
-    ids=["not-json", "not-utf-8", "nested-too-deep", "a-byte-order-mark"],
+    ids=["not-json", "not-utf-8", "nested-too-deep", "no-permission"],
 )
-def test_a_record_that_cant_be_read_is_counted_and_stops_nothing_else(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, broken: bytes
+def test_records_that_cant_be_read_are_counted_and_stop_nothing_else(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, broken: bytes, mode: int
 ) -> None:
     root = tmp_path / "qa"
     target = committed(root)
     before = target.read_text()
     proposal = recorded(root, REBIND, run="a-good-run")
-    other = root / ".aqa" / "runs" / "a-broken-run" / "replay.json"
-    other.parent.mkdir()
-    other.write_bytes(broken)
+    for run in ("a-broken-run", "another-broken-run"):
+        other = root / ".aqa" / "runs" / run / "replay.json"
+        other.parent.mkdir()
+        other.write_bytes(broken)
+        other.chmod(mode)
 
     missing = apply(root, monkeypatch, "ah_0123456789ab")
     applied = apply(root, monkeypatch, proposal)
 
     assert missing.exit_code == 5, missing.output
     assert (
-        f"  no run record under {root} holds it, and 1 couldn't be read\n"
+        f"  no run record under {root} holds it, and 2 couldn't be read\n"
         in missing.stderr
     )
     assert applied.exit_code == 0, applied.output
@@ -328,8 +382,8 @@ def test_a_spec_id_that_isnt_text_holds_no_proposal(
 
 @pytest.mark.parametrize(
     "cwd",
-    [".", "qa", "qa/.compiled", "src/deeper"],
-    ids=["the-repo-root", "the-spec-root", "below-the-spec-root", "beside-it"],
+    [".", "qa/.compiled", "src/deeper"],
+    ids=["the-repo-root", "below-the-spec-root", "beside-it"],
 )
 def test_apply_finds_the_spec_root_from_the_repo_root_and_below_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cwd: str
@@ -343,6 +397,20 @@ def test_apply_finds_the_spec_root_from_the_repo_root_and_below_it(
     (tmp_path / "src" / "deeper").mkdir(parents=True)
 
     result = apply(tmp_path / cwd, monkeypatch, proposal)
+
+    assert result.exit_code == 0, result.output
+    assert target.read_text() == before.replace(LOCATORS, MOVED_LOCATORS)
+
+
+def test_a_spec_root_not_named_qa_is_found_from_inside_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "specs"
+    target = committed(root)
+    before = target.read_text()
+    proposal = recorded(root, REBIND)
+
+    result = apply(root, monkeypatch, proposal)
 
     assert result.exit_code == 0, result.output
     assert target.read_text() == before.replace(LOCATORS, MOVED_LOCATORS)
