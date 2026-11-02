@@ -150,9 +150,9 @@ def _target_problems(script: CompiledScript, healed: CompiledScript) -> Iterator
     claims = _claims(script)
     for name in healed.targets:
         if name not in script.targets:
-            yield f"/targets/{_pointer(name)}: a heal adds no target"
+            yield f"/targets/{pointer(name)}: a heal adds no target"
     for name, target in script.targets.items():
-        path = f"/targets/{_pointer(name)}"
+        path = f"/targets/{pointer(name)}"
         if name not in healed.targets:
             yield f"{path}: a heal removes no target"
             continue
@@ -174,7 +174,7 @@ def _target_problems(script: CompiledScript, healed: CompiledScript) -> Iterator
                 )
 
 
-def _pointer(name: str) -> str:
+def pointer(name: str) -> str:
     """`name` as one JSON pointer token (RFC 6901)."""
     return name.replace("~", "~0").replace("/", "~1")
 

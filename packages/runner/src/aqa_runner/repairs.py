@@ -9,9 +9,18 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from aqa_core.compiled import CompiledScript, Step, TextInTarget, VisibleUnoccluded
+from aqa_core.compiled import (
+    Click,
+    CompiledScript,
+    Fill,
+    FillSecret,
+    Select,
+    Step,
+    TextInTarget,
+    VisibleUnoccluded,
+)
 from aqa_core.config import ProjectConfig
-from aqa_core.heal_patch import heal_patch_problems
+from aqa_core.heal_patch import heal_patch_problems, pointer
 from aqa_core.project import SpecError, parse_compiled
 from aqa_core.spec import Spec
 from pydantic_core import PydanticSerializationError
@@ -114,11 +123,21 @@ class Handing:
     ) -> Repaired:
         """Give the repair a `Drift` for `at`, with deep copies of it and of
         `in_use`, then check and record what it offers (`_checked`). What the
-        repair raises leaves as any failure of the run does."""
-        offered = await self.repair(
-            Drift(deepcopy(at), misses, in_use.model_copy(deep=True), self.session)
-        )
-        repaired = await self._checked(at, misses, offered, in_use, ran)
+        repair raises leaves as any failure of the run does. A target a step in
+        `ran` acted through goes to no repair and is recorded as refused: no
+        offer could change it (`_ran_problems`), so nothing is spent asking."""
+        target = at.step.target if isinstance(at, StepAt) else at.check.target
+        if target in _acted_through(ran):
+            problem = (
+                f"/targets/{pointer(target)}: a step that already ran acted "
+                "through this target, so it goes to no repair"
+            )
+            repaired = self._refused(at, misses, [problem])
+        else:
+            offered = await self.repair(
+                Drift(deepcopy(at), misses, in_use.model_copy(deep=True), self.session)
+            )
+            repaired = await self._checked(at, misses, offered, in_use, ran)
         self.repaired.append(repaired)
         return repaired
 
@@ -138,8 +157,8 @@ class Handing:
         each problem is scanned: its JSON, which must hold only values its
         fields' types allow (refused unquoted) and no bound value's spelling;
         the loader's rules, which a `model_copy` skips; the heal-patch
-        validator, against `committed`; its first steps must be those that
-        ran, `ran`, unchanged, since the run goes on after them; replay's own
+        validator, against `committed`; what ran stays as it ran
+        (`_ran_problems`), since the run goes on after it; replay's own
         admission (`accepted`); and the record, which checks the document as
         written and refuses one that spells a bound value, so nothing runs
         that isn't recorded. The refusal is recorded through the same check,
@@ -167,7 +186,7 @@ class Handing:
                 heal_patch_problems, self.committed, patched
             )
             if not problems:
-                problems = _ran_problems(patched, ran, at)
+                problems = _ran_problems(patched, in_use, ran, at)
             if not problems:
                 accepted(patched, self.spec)
                 taken = Repaired(at, misses, (), patched)
@@ -181,18 +200,41 @@ class Handing:
             problems = error.problems
         except RefusedWriteError as error:
             problems = [str(error)]
-        scanned = tuple(record.redactor.redact(problem) for problem in problems)
+        return self._refused(at, misses, problems)
+
+    def _refused(
+        self, at: At, misses: tuple[Miss, ...], problems: Sequence[str]
+    ) -> Repaired:
+        """`at`'s repair refused, each of `problems` scanned, and recorded."""
+        name = f"repairs/{at.key}.json"
+        redactor = self.record.redactor
+        scanned = tuple(redactor.redact(problem) for problem in problems)
         refused = Repaired(at, misses, scanned, None)
-        record.write(name, _repair_record(refused), check=clean)
+        self.record.write(
+            name, _repair_record(refused), check=require_clean(redactor, name)
+        )
         return refused
 
 
-def _ran_problems(patched: CompiledScript, ran: Sequence[Step], at: At) -> list[str]:
-    """Why `patched` changes what ran, `ran` as the script in use holds its
-    steps. The validator reads only the committed script, so this also keeps
-    an earlier repair's inserted steps that ran as they ran: what the record
-    holds as run must be what ran. Every step has run by the time an
-    assertion drifts, so its repair inserts none."""
+def _acted_through(ran: Sequence[Step]) -> set[str]:
+    """The targets `ran`, the steps that ran, acted through."""
+    return {
+        step.target
+        for step in ran
+        if isinstance(step, Click | Fill | FillSecret | Select)
+    }
+
+
+def _ran_problems(
+    patched: CompiledScript, in_use: CompiledScript, ran: Sequence[Step], at: At
+) -> list[str]:
+    """Why `patched` changes what ran, `ran` as `in_use` holds its steps. The
+    validator reads only the committed script, so this also keeps an earlier
+    repair's inserted steps that ran as they ran: what the record holds as run
+    must be what ran. Every step has run by the time an assertion drifts, so
+    its repair inserts none. A target a step acted through stays as that step
+    found it, compared with `in_use`, so an earlier repair's binding may stay:
+    otherwise the run's script would hold locators no step ran through."""
     kept = patched.steps[: len(ran)]
     if [step.seq for step in kept] != [step.seq for step in ran]:
         return ["/steps: a repair inserts no step before a step that already ran"]
@@ -205,6 +247,14 @@ def _ran_problems(patched: CompiledScript, ran: Sequence[Step], at: At) -> list[
         problems.append(
             "/steps: an assertion's repair inserts no step: every step has run"
         )
+    problems.extend(
+        (
+            f"/targets/{pointer(name)}: a repair rebinds no target a step that "
+            "already ran acted through"
+        )
+        for name in sorted(_acted_through(ran))
+        if patched.targets[name] != in_use.targets[name]
+    )
     return problems
 
 
