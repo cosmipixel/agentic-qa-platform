@@ -20,14 +20,10 @@ from aqa_runner import explore_turns, model_router, navigator
 from aqa_runner.browser_session import BrowserSession
 from aqa_runner.chat_client import Reply
 from aqa_runner.egress import EgressGate
-from aqa_runner.explore_turns import (
-    Turning,
-    UnsentRequestError,
-    take_turns,
-    unspelled,
-)
+from aqa_runner.explore_turns import Turning, take_turns
 from aqa_runner.locator_generation import TargetUses
 from aqa_runner.model_router import ModelCallError
+from aqa_runner.model_turns import UnsentRequestError, unspelled
 from aqa_runner.navigator import Click
 from aqa_runner.navigator_tools import ActionResult, Attempt
 from aqa_runner.reasons import UnansweredError
