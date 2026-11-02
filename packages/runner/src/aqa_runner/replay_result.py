@@ -505,7 +505,8 @@ class _Healed:
     def judged(self, judged: list[_Judged]) -> list[_Judged]:
         """`judged`, each ruled on. Only when every one of the run's own verdicts
         passes and nothing troubled it is a subject on the rebound set
-        `drift_consistent`; with none on it, the run just passed."""
+        `drift_consistent`; with none on it, the run just passed. Each finding lists
+        the steps on the set."""
         passed = self.untroubled and all(each.verdict == "pass" for each in judged)
         rebound_steps = [
             each.subject.name
