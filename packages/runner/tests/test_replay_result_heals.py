@@ -618,25 +618,41 @@ def test_each_rebound_subject_cites_the_repair_that_first_changed_its_target(
     assert written["heal_proposal"]["patch"][0]["value"] == [{"css": "button.save"}]
 
 
+def flipping_back(run: Made) -> tuple[Repaired, Repaired]:
+    """Two repairs of `save` that end on its committed locators."""
+    away = rebinding(run.script, save=NEW_SAVE)
+    check = run.script.assertions[3]
+    assert isinstance(check, VisibleUnoccluded)
+    return (
+        Repaired(AssertionAt(3, check), MISSED, (), away, None),
+        Repaired(AssertionAt(3, check), MISSED, (), run.script, None),
+    )
+
+
 def test_a_final_script_with_the_committed_locators_passes_and_proposes_nothing(
     tmp_path: Path,
 ) -> None:
     """A target that flipped back: both evaluations read the committed locators."""
     run = made(tmp_path)
-    away = rebinding(run.script, save=NEW_SAVE)
-    check = run.script.assertions[3]
-    assert isinstance(check, VisibleUnoccluded)
-    repairs = (
-        Repaired(AssertionAt(3, check), MISSED, (), away, None),
-        Repaired(AssertionAt(3, check), MISSED, (), run.script, None),
-    )
 
-    end = passing_with(run, base=BLOB, repairs=repairs)
+    end = passing_with(run, base=BLOB, repairs=flipping_back(run))
     written = document(end)
 
     assert (written["outcome"], written["exit_code"]) == ("passed", 0)
     assert written["heal_proposal"] is None
     assert judged(end, "assertion", "a4")["verdict"] == "pass"
+
+
+def test_a_finding_lists_no_step_on_a_target_that_flipped_back(tmp_path: Path) -> None:
+    """Step 1 ran through `save`, and `save` ended on its committed locators."""
+    run = made(tmp_path)
+
+    end = passing_with(
+        run, base=BLOB, repairs=flipping_back(run), **violated("console_errors")
+    )
+
+    entry = judged(end, "invariant", "console_errors")
+    assert entry["finding"]["rebound_steps"] == []
 
 
 def test_a_run_that_cant_write_its_record_says_what_mode_it_was(tmp_path: Path) -> None:
