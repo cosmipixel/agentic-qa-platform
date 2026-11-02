@@ -13,7 +13,10 @@ from typing import Any
 import pytest
 from aqa_cli import common
 from aqa_cli import heal as heal_module
+from aqa_core.compiled import CompiledScript
+from aqa_core.config import ProjectConfig
 from aqa_core.heal_patch import blob_sha, proposal_id
+from aqa_core.project import read_compiled
 from aqa_runner import publication
 from playwright._impl._browser_type import BrowserType
 
@@ -467,16 +470,21 @@ def test_a_proposal_applied_once_is_stale_the_second_time(
 def test_a_script_changed_after_its_read_is_not_overwritten(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The change lands just after the read, so it is refused only if what the lock's
+    comparison holds was found before that read."""
     root = tmp_path / "qa"
     target = committed(root)
     proposal = recorded(root, REBIND)
     changed = target.read_text() + "\n"
 
-    async def changing_it_first(*args: Any, **kwargs: Any) -> None:
+    def changing_it_after(
+        path: Path, config: ProjectConfig
+    ) -> tuple[CompiledScript, bytes]:
+        read = read_compiled(path, config)
         target.write_text(changed)
-        await publication.publish_text(*args, **kwargs)
+        return read
 
-    monkeypatch.setattr(heal_module, "publish_text", changing_it_first)
+    monkeypatch.setattr(common, "read_compiled", changing_it_after)
 
     result = apply(root, monkeypatch, proposal)
 
