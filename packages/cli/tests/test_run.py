@@ -4,6 +4,7 @@ into a proposal a person applies, and the exit code rolled up across specs. Real
 Chromium against #240's drift pages. `test_heal*.py` hold the heal's rules and
 `test_replay_result_heals.py` the verdicts'; these hold the command."""
 
+import difflib
 import json
 import re
 import shutil
@@ -20,7 +21,8 @@ from aqa_cli import common
 from aqa_cli import run as run_module
 from aqa_cli.main import app as aqa
 from aqa_core.compiled import CompiledScript
-from aqa_core.project import load_project
+from aqa_core.heal_patch import heal_patch_problems
+from aqa_core.project import load_project, parse_compiled
 from aqa_runner.publication import published_text
 from aqa_runner.strict_replay import Replayed
 from playwright._impl._browser_type import BrowserType
@@ -174,17 +176,10 @@ def record_of(spec: Path) -> Path:
     return record
 
 
-def patched(document: dict[str, Any], patch: list[dict[str, Any]]) -> dict[str, Any]:
-    """`document` with each RFC 6902 `replace` applied, as a person's tool would,
-    knowing nothing of how the patch was made."""
-    for change in patch:
-        assert change["op"] == "replace"
-        *parents, last = change["path"].removeprefix("/").split("/")
-        at = document
-        for token in parents:
-            at = at[token.replace("~1", "/").replace("~0", "~")]
-        at[last.replace("~1", "/").replace("~0", "~")] = change["value"]
-    return document
+def printed_diff(result: typer.testing.Result) -> list[str]:
+    """The unified diff a run printed of its proposal, as its lines were."""
+    lines = [line.removeprefix("  ") for line in result.stderr.splitlines()]
+    return lines[lines.index("--- a/.compiled/order.json") :]
 
 
 def cited_paths_all_exist(spec: Path) -> None:
@@ -196,10 +191,16 @@ def cited_paths_all_exist(spec: Path) -> None:
 
 
 def assert_healed_and_applies(
-    spec: Path, app: App, result: typer.testing.Result, case: Drifted
+    spec: Path,
+    app: App,
+    result: typer.testing.Result,
+    case: Drifted,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The run proposed `case`'s locators, said so, left the committed file alone,
-    and the proposal, applied, replays clean with every locator and no model."""
+    and `aqa heal apply` changes only those locators, by the diff the run printed,
+    into a script the validator takes that replays clean with every locator and no
+    model."""
     before = compiled_of(spec).read_text()
     assert result.exit_code == 7, result.output
     document = replay_json(spec)
@@ -220,8 +221,30 @@ def assert_healed_and_applies(
     assert "  +++ b/.compiled/order.json\n" in result.stderr
     assert compiled_of(spec).read_text() == before
     cited_paths_all_exist(spec)
-    applied = patched(json.loads(before), proposal["patch"])
-    compiled_of(spec).write_text(json.dumps(applied))
+    monkeypatch.chdir(spec.parent)
+    applied = typer.testing.CliRunner().invoke(aqa, ["heal", "apply", proposal["id"]])
+    assert applied.exit_code == 0, applied.output
+    after = compiled_of(spec).read_text()
+    expected = json.loads(before)
+    expected["targets"]["toggle"]["locators"] = case.locators
+    assert json.loads(after) == expected
+    assert printed_diff(result) == list(
+        difflib.unified_diff(
+            before.splitlines(),
+            after.splitlines(),
+            "a/.compiled/order.json",
+            "b/.compiled/order.json",
+            lineterm="",
+        )
+    )
+    config = load_project(spec.parent).config
+    assert (
+        heal_patch_problems(
+            parse_compiled(before, config, source=compiled_of(spec)),
+            parse_compiled(after, config, source=compiled_of(spec)),
+        )
+        == []
+    )
     replayed = typer.testing.CliRunner().invoke(
         aqa, ["replay", str(spec), "--url", app.origin]
     )
@@ -236,7 +259,7 @@ def test_a_drifted_step_heals_into_a_proposal_and_exits_7(
 
     with serving(case.html) as app:
         result = run(monkeypatch, [str(spec), "--url", app.origin], Scripted(case.pick))
-        assert_healed_and_applies(spec, app, result, case)
+        assert_healed_and_applies(spec, app, result, case, monkeypatch)
 
 
 @pytest.mark.parametrize("case", BOTH)
@@ -248,7 +271,7 @@ def test_a_drifted_assertion_target_heals_into_a_proposal_and_exits_7(
     with serving(case.html) as app:
         result = run(monkeypatch, [str(spec), "--url", app.origin], Scripted(case.pick))
         assert (record_of(spec) / "repairs/assertion-0.json").exists()
-        assert_healed_and_applies(spec, app, result, case)
+        assert_healed_and_applies(spec, app, result, case, monkeypatch)
 
 
 def test_a_run_line_says_the_outcome_time_cost_and_record(

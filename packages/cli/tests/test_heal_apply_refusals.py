@@ -1,0 +1,507 @@
+"""What `aqa heal apply <proposal_id>` refuses (API.md §7; ADR-0024's #247 amendment):
+a proposal file is untrusted input, and applying never changes assertions, meanings or
+side-effect steps, even from a hand-edited file. Some of these edit a file under its
+id, which the id check refuses; the rest carry the id their content has, so only the
+proposal's shape, the loader, the validator or replay's admission can refuse them."""
+
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+import pytest
+from aqa_core.heal_patch import blob_sha, proposal_id
+
+from packages.cli.tests.heal_apply_fixtures import (
+    A_STEP,
+    KEPT_SIDE_EFFECT,
+    REBIND,
+    SAVING,
+    apply,
+    committed,
+    files,
+    recorded,
+)
+from packages.runner.tests.drift_fixtures import SHIPPING
+
+# What a refusal says after the first line, by why.
+EDITED = "the proposal doesn't match its id, so it was edited after its run"
+NOT_ONE = "the proposal isn't one aqa run writes"
+OUTSIDE = "a heal changes nothing but target locators and inserted steps"
+A_SIDE_EFFECT = {
+    "seq": 9,
+    "action": "click",
+    "target": "toggle",
+    "side_effect": True,
+    "side_effect_basis": "network: a write request",
+}
+NESTED_TOO_DEEP: object = []
+for _ in range(400):
+    NESTED_TOO_DEEP = [NESTED_TOO_DEEP]
+
+
+def replacing(path: str, value: object) -> list[dict[str, Any]]:
+    return [{"op": "replace", "path": path, "value": value}]
+
+
+def inserting(step: dict[str, Any]) -> list[dict[str, Any]]:
+    return [{"op": "add", "path": "/steps/0", "value": step}]
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        # One the validator allows: only the id can tell it from what was reviewed.
+        pytest.param(
+            replacing("/targets/toggle/locators", [{"css": "#decoy"}]),
+            id="a-decoy-locator",
+        ),
+        pytest.param(replacing("/assertions/0/text", "anything"), id="an-assertion"),
+    ],
+)
+def test_a_patch_edited_after_its_run_is_refused_by_its_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patch: list[dict[str, Any]]
+) -> None:
+    root = tmp_path / "qa"
+    committed(root)
+    proposal = recorded(root, REBIND, edit=lambda held: held.update(patch=patch))
+    before = files(tmp_path)
+
+    result = apply(root, monkeypatch, proposal)
+
+    assert result.exit_code == 5, result.output
+    assert result.stderr == (
+        f"spec_error {proposal}: nothing was applied\n  {EDITED}\n"
+    )
+    assert result.stdout == ""
+    assert files(tmp_path) == before
+
+
+def test_a_base_edited_to_match_a_changed_script_is_refused_by_its_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "qa"
+    target = committed(root)
+    typed = proposal_id("order", blob_sha(target.read_bytes()), REBIND)
+    target.write_text(target.read_text() + "\n")
+    recorded(root, REBIND, edit=lambda held: held.update(id=typed))
+    before = files(tmp_path)
+
+    result = apply(root, monkeypatch, typed)
+
+    assert result.exit_code == 5, result.output
+    assert EDITED in result.stderr
+    assert files(tmp_path) == before
+
+
+def test_a_rewritten_file_isnt_found_under_its_old_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "qa"
+    target = committed(root)
+    typed = proposal_id("order", blob_sha(target.read_bytes()), REBIND)
+    recorded(root, replacing("/targets/toggle/locators", [{"css": "#d"}]))
+    before = files(tmp_path)
+
+    result = apply(root, monkeypatch, typed)
+
+    assert result.exit_code == 5, result.output
+    assert f"  no run record under {root} holds it\n" in result.stderr
+    assert files(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    ("edit", "reason"),
+    [
+        pytest.param(
+            lambda held: held.update(compiled="../../evil.json"),
+            EDITED,
+            id="compiled-out-of-the-root",
+        ),
+        pytest.param(
+            lambda held: held.update(compiled=".compiled/other.json"),
+            EDITED,
+            id="compiled-another-file",
+        ),
+        pytest.param(
+            lambda held: held["base"].update(pr_head_sha="abc123"),
+            NOT_ONE,
+            id="a-pr-head",
+        ),
+        pytest.param(lambda held: held.update(note="hi"), NOT_ONE, id="an-extra-key"),
+        pytest.param(lambda held: held.pop("base"), NOT_ONE, id="no-base"),
+        pytest.param(lambda held: held.update(patch="x"), NOT_ONE, id="no-patch-list"),
+    ],
+)
+def test_edited_fields_outside_the_id_are_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    edit: Callable[[dict[str, Any]], object],
+    reason: str,
+) -> None:
+    root = tmp_path / "qa"
+    committed(root)
+    proposal = recorded(root, REBIND, edit=edit)
+    before = files(tmp_path)
+
+    result = apply(root, monkeypatch, proposal)
+
+    assert result.exit_code == 5, result.output
+    assert result.stderr == (
+        f"spec_error {proposal}: nothing was applied\n  {reason}\n"
+    )
+    assert files(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"op": "remove", "path": "/targets/toggle/locators"},
+        {"op": "move", "path": "/targets/toggle/locators", "from": "/steps"},
+        {"op": "copy", "path": "/targets/toggle/locators", "from": "/steps"},
+        {"op": "test", "path": "/targets/toggle/locators", "value": []},
+        {"op": "replace", "path": "/targets/toggle/locators"},
+        {"op": "replace", "path": "/targets/toggle/locators", "value": [], "from": "/"},
+        {"op": "replace", "path": 7, "value": []},
+        {"op": "replace", "path": "/x", "value": NESTED_TOO_DEEP},
+    ],
+    ids=[
+        "remove",
+        "move",
+        "copy",
+        "test",
+        "no-value",
+        "an-extra-key",
+        "a-number-path",
+        "a-value-nested-too-deep",
+    ],
+)
+def test_a_proposal_takes_only_a_heals_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: dict[str, Any]
+) -> None:
+    """Each with the id its content has, so only the proposal's shape can refuse."""
+    root = tmp_path / "qa"
+    committed(root)
+    proposal = recorded(root, [change])
+    before = files(tmp_path)
+
+    result = apply(root, monkeypatch, proposal)
+
+    assert result.exit_code == 5, result.output
+    assert f"  {NOT_ONE}\n" in result.stderr
+    assert files(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    ("patch", "reason"),
+    [
+        pytest.param(
+            replacing("/assertions/0/text", "anything"),
+            f"/assertions: {OUTSIDE}",
+            id="an-assertions-text",
+        ),
+        pytest.param(
+            replacing("/assertions/1/min_size_px", [1, 2]),
+            f"/assertions: {OUTSIDE}",
+            id="an-assertions-bound",
+        ),
+        pytest.param(
+            replacing("/targets/toggle/semantic", "anything"),
+            "/targets/toggle/semantic: a heal never changes a target's meaning",
+            id="a-meaning",
+        ),
+        pytest.param(
+            [
+                {
+                    "op": "add",
+                    "path": "/targets/toggle/contract",
+                    "value": {"region": "main", "part": "button"},
+                }
+            ],
+            "/targets/toggle/contract: a heal never changes a subject contract, "
+            "which only the reviewed config gives",
+            id="a-contract",
+        ),
+        pytest.param(
+            [
+                *replacing("/steps/0/side_effect", True),
+                {"op": "add", "path": "/steps/0/side_effect_basis", "value": "a basis"},
+            ],
+            "/steps/0/side_effect: a heal rewrites no existing step\n"
+            "  /steps/0/side_effect_basis: a heal rewrites no existing step",
+            id="a-replay-safe-step-made-a-side-effect",
+        ),
+        pytest.param(
+            replacing("/steps/1/side_effect_basis", "a basis"),
+            "/steps/1/side_effect_basis: a heal rewrites no existing step",
+            id="a-side-effects-basis",
+        ),
+        pytest.param(
+            replacing("/steps/1/target", "summary"),
+            "/steps/1/target: a heal rewrites no existing step",
+            id="a-side-effect-steps-target",
+        ),
+        pytest.param(
+            replacing("/steps", [KEPT_SIDE_EFFECT]),
+            "/steps/0: a heal removes no step",
+            id="a-step-removed",
+        ),
+        pytest.param(
+            replacing("/steps", [KEPT_SIDE_EFFECT, A_STEP]),
+            "/steps: a heal reorders no step",
+            id="the-steps-reordered",
+        ),
+        pytest.param(
+            inserting(A_SIDE_EFFECT),
+            "/steps/0/side_effect: a heal inserts only replay-safe steps",
+            id="an-inserted-side-effect",
+        ),
+        pytest.param(
+            inserting(
+                {"seq": 9, "action": "navigate", "url": "/x", "side_effect": False}
+            ),
+            "/steps/0/action: a heal inserts no navigation, which could route "
+            "around a path that is broken for its users",
+            id="an-inserted-navigate",
+        ),
+        pytest.param(
+            inserting({"seq": 9, "action": "reload", "side_effect": False}),
+            "/steps/0/action: a heal inserts no reload, which loads the page again "
+            "and could route around a path that is broken for its users",
+            id="an-inserted-reload",
+        ),
+        pytest.param(
+            replacing("/spec_hash", "sha256:" + "1" * 64),
+            f"/spec_hash: {OUTSIDE}",
+            id="the-spec-hash",
+        ),
+        pytest.param(
+            replacing("/compiled_by/price_map", "another"),
+            f"/compiled_by: {OUTSIDE}",
+            id="provenance",
+        ),
+        pytest.param(
+            replacing("/browser/timezone", "Asia/Tokyo"),
+            f"/browser: {OUTSIDE}",
+            id="the-browser",
+        ),
+        pytest.param(
+            replacing("/coverage/expectations/0/claim", "anything"),
+            f"/coverage: {OUTSIDE}",
+            id="the-coverage",
+        ),
+        pytest.param(
+            replacing("/confirmed", False), f"/confirmed: {OUTSIDE}", id="confirmed"
+        ),
+        pytest.param(
+            [
+                {
+                    "op": "add",
+                    "path": "/targets/new",
+                    "value": {"semantic": "new", "locators": [{"css": "#n"}]},
+                }
+            ],
+            "/targets/new: a heal adds no target",
+            id="a-new-target",
+        ),
+        pytest.param(
+            replacing("/targets/toggle/locators", [{"css": "li:nth-child(2) a"}]),
+            "/targets/toggle/locators/0/css: a heal finds no element by its position "
+            "among its siblings",
+            id="a-positional-locator",
+        ),
+        pytest.param(
+            replacing("/targets/summary/locators", [{"label": "Summary"}]),
+            "/targets/summary/locators/0: a heal finds no assertion's target by a "
+            "label or placeholder, or by a name when its text is checked",
+            id="an-assertions-target-by-a-label",
+        ),
+    ],
+)
+def test_a_patch_the_validator_refuses_changes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    patch: list[dict[str, Any]],
+    reason: str,
+) -> None:
+    """Each with the id its content has, so only the validator can refuse."""
+    root = tmp_path / "qa"
+    committed(root, SAVING)
+    proposal = recorded(root, patch)
+    before = files(tmp_path)
+
+    result = apply(root, monkeypatch, proposal)
+
+    assert result.exit_code == 5, result.output
+    assert result.stderr == (
+        f"spec_error {proposal}: nothing was applied\n  {reason}\n"
+    )
+    assert result.stdout == ""
+    assert files(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    ("patch", "said"),
+    [
+        pytest.param(
+            replacing("/steps/1/side_effect", False),
+            "steps[1]",
+            id="a-side-effect-flag-lowered",
+        ),
+        pytest.param(
+            replacing("/targets/toggle/locators", []),
+            "targets.toggle.locators",
+            id="no-locators",
+        ),
+        pytest.param(
+            replacing("/targets/toggle/locators", [{"css": "\ud800"}]),
+            "unable to parse raw data as a unicode string",
+            id="a-lone-surrogate",
+        ),
+        pytest.param(
+            replacing("/targets/toggle/locators", [{"css": float("nan")}]),
+            "targets.toggle.locators",
+            id="not-a-number",
+        ),
+        pytest.param(
+            [{"op": "add", "path": "/targets/toggle/unknown", "value": 1}],
+            "targets.toggle.unknown",
+            id="an-unknown-field",
+        ),
+        pytest.param(inserting(A_STEP), "steps[1].seq", id="a-seq-already-used"),
+        pytest.param(
+            inserting(
+                {
+                    "seq": 9,
+                    "action": "fill_secret",
+                    "target": "toggle",
+                    "secret": "TEST_PASSWORD",
+                    "side_effect": False,
+                }
+            ),
+            "secret TEST_PASSWORD is not declared",
+            id="an-inserted-fill-secret",
+        ),
+    ],
+)
+def test_a_patch_the_loader_refuses_changes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    patch: list[dict[str, Any]],
+    said: str,
+) -> None:
+    root = tmp_path / "qa"
+    target = committed(root, SAVING)
+    proposal = recorded(root, patch)
+    before = files(tmp_path)
+
+    result = apply(root, monkeypatch, proposal)
+
+    assert result.exit_code == 5, result.output
+    assert result.stderr.startswith(
+        f"spec_error {proposal}: nothing was applied\n  {target}: "
+    )
+    assert said in result.stderr
+    assert files(tmp_path) == before
+
+
+def test_a_path_the_patch_cant_follow_exits_5(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "qa"
+    committed(root)
+    proposal = recorded(root, replacing("/missing/deeper", 1))
+    before = files(tmp_path)
+
+    result = apply(root, monkeypatch, proposal)
+
+    assert result.exit_code == 5, result.output
+    assert result.stderr == (
+        f"spec_error {proposal}: nothing was applied\n"
+        "  /missing/deeper: a patch can't follow this path\n"
+    )
+    assert files(tmp_path) == before
+
+
+def test_a_spec_edited_since_the_run_is_refused_as_replay_refuses_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "qa"
+    committed(root)
+    proposal = recorded(root, REBIND)
+    spec = root / "order.spec.md"
+    spec.write_text(spec.read_text().replace(SHIPPING, "The order says what it holds"))
+    before = files(tmp_path)
+
+    result = apply(root, monkeypatch, proposal)
+
+    assert result.exit_code == 5, result.output
+    assert result.stderr == (
+        f"spec_error {proposal}: nothing was applied\n"
+        "  compiled from another version of the spec: explore it again\n"
+    )
+    assert files(tmp_path) == before
+
+
+def test_subject_contracts_changed_since_the_run_are_refused_as_replay_refuses_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "qa"
+    committed(root)
+    proposal = recorded(root, REBIND)
+    (root / "config.yaml").write_text(
+        "budgets: { resolve_seconds: 1 }\n"
+        "subjects:\n"
+        "  - { spec: order, expect: 0, region: main, part: p }\n"
+    )
+    before = files(tmp_path)
+
+    result = apply(root, monkeypatch, proposal)
+
+    assert result.exit_code == 5, result.output
+    assert "compiled under other subject contracts: explore it again" in result.stderr
+    assert files(tmp_path) == before
+
+
+def test_an_inserted_step_replay_wouldnt_run_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "qa"
+    committed(root)
+    proposal = recorded(
+        root,
+        inserting({"seq": 9, "action": "press", "key": "a+b", "side_effect": False}),
+    )
+    before = files(tmp_path)
+
+    result = apply(root, monkeypatch, proposal)
+
+    assert result.exit_code == 5, result.output
+    assert result.stderr == (
+        f"spec_error {proposal}: nothing was applied\n"
+        "  steps[0] (seq 9): press takes one key, with only modifiers held before "
+        "it: 'a+b'\n"
+    )
+    assert files(tmp_path) == before
+
+
+def test_a_refusal_escapes_control_characters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "qa"
+    committed(root)
+    proposal = recorded(
+        root,
+        [
+            {
+                "op": "add",
+                "path": "/targets/\x1b[31mred",
+                "value": {"semantic": "new", "locators": [{"css": "#n"}]},
+            }
+        ],
+    )
+
+    result = apply(root, monkeypatch, proposal)
+
+    assert result.exit_code == 5, result.output
+    assert "\x1b" not in result.stderr
+    assert "  /targets/\\x1b[31mred: a heal adds no target\n" in result.stderr
