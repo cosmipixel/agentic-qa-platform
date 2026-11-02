@@ -1,6 +1,8 @@
 """A healer's turns on one drift (ADR-0024's #244 amendment; ADR-0006): a
 LangGraph graph per drift, whose state is plain data, with what the turns use in
-its context, never in state, so a page's text never enters a checkpoint.
+its context, never in state. So no snapshot enters a checkpoint: the only text
+that does is what the last rebind did, scanned, which can quote a page's words
+when a look's error does.
 
 Each turn looks at the page once (`session.snapshot`), sends the model the
 target's meaning, its locators and that snapshot (`healer.heal_request`), and
@@ -82,7 +84,7 @@ _LONGEST_STRING: Final = 100
 
 class _Turns(TypedDict):
     """The graph's state, plain data a checkpoint keeps: this drift's turns
-    taken, what the last rebind did, and whether the turns are over."""
+    taken, what the last rebind did, scanned, and whether the turns are over."""
 
     turn: int
     results: str
