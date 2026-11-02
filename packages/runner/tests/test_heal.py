@@ -46,6 +46,7 @@ from packages.runner.tests.secret_fixtures import BOUND_AT_START, FAKE_VALUE
 from packages.runner.tests.test_replay_repairs import secret_spec_at
 
 UNWRITTEN = "the run record took no more lines, so the heal stopped"
+CANARY = "canary-only-the-model-wrote"
 # The toggle clicked, then a summary one of whose locators the page no longer
 # has: a step's drift, then an assertion's.
 SUMMARY_DRIFTS = compiled(
@@ -328,6 +329,45 @@ def test_a_healer_reply_that_writes_locators_runs_nothing(
     ) in run.requests()[1]
     assert basis(run).said == FOUND_NONE
     assert run.result.repairs[0].script is None
+
+
+@pytest.mark.parametrize(
+    ("unfit", "said"),
+    [
+        pytest.param(
+            calling(
+                "rebind", {"ref": CANARY, "confidence": CANARY, "rationale": CANARY}
+            ),
+            "the call to rebind was not run: its arguments don't fit the tool",
+            id="in_its_arguments",
+        ),
+        pytest.param(
+            calling(CANARY, {"ref": CANARY}),
+            "the reply called a tool the healer doesn't have, so nothing ran",
+            id="in_a_tools_name",
+        ),
+    ],
+)
+def test_nothing_the_model_wrote_in_a_call_it_cant_run_is_echoed(
+    tmp_path: Path, unfit: Reply, said: str
+) -> None:
+    run = healed(tmp_path, unfit, NO_TOOL)
+
+    assert said in run.requests()[1]
+    assert CANARY not in run.requests()[1]
+
+
+def test_a_targets_non_ascii_meaning_reaches_the_request_as_written() -> None:
+    [_, human] = heal_request(
+        "the café's button",
+        [ByRole(role="button", name="Café")],
+        "",
+        NO_SECRETS.redact(""),
+        redactor=NO_SECRETS,
+    )
+
+    assert '"meaning": "the café\'s button"' in human.text
+    assert '"name": "Café"' in human.text
 
 
 def test_a_tool_the_healer_doesnt_have_takes_another_turn(tmp_path: Path) -> None:
