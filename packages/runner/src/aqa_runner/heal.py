@@ -78,7 +78,7 @@ _INTERRUPTED: Final = "the run was interrupted, so the heal stopped"
 _PAGE_LEVEL: Final = frozenset(
     {"region_absent", "region_ambiguous", "part_absent", "part_ambiguous"}
 )
-# What a heal that stopped adds once a pick was outside the subject's region. It
+# What a heal that gave up adds once a pick was outside the subject's region. It
 # may be a subject that moved or only a wrong pick, and telling them apart would
 # take another read of the page, so the words say `if` (#229).
 _OUTSIDE_ITS_REGION: Final = (
@@ -179,8 +179,11 @@ class _Heal:
         return self.redactor.redact(" ".join(scanned.split()), limit=REASON_CHARS)
 
     def gave_up(self, stop: _Stop) -> Offer:
-        why = f"{stop.why}; {_OUTSIDE_ITS_REGION}" if self.outside_region else stop.why
-        said = self.redactor.redact(why)
+        # A stop of the whole run is the model's or the record's: no config edit.
+        adds = self.outside_region and stop.run is None
+        said = self.redactor.redact(
+            f"{stop.why}; {_OUTSIDE_ITS_REGION}" if adds else stop.why
+        )
         record = self.folder if self.observed else None
         return Offer(self.drift.script, Basis(said, None, stop.run, record))
 
@@ -383,8 +386,10 @@ async def _bound(
 
 def _contract_refused(context: _Heal, error: BindingRefusedError) -> _Stop | str:
     """A refused pick's fixed reason code, never the subject check's words,
-    which name the navigator's tools."""
+    which name the navigator's tools. `context` remembers a pick outside the
+    region until a page-level stop, whose own words ask for the config edit."""
     if error.reason in _PAGE_LEVEL:
+        context.outside_region = False
         return _Stop(
             f"the subject contract refuses this page ({error.reason}); "
             "heal never changes a contract, so a reviewed config edit is needed"
